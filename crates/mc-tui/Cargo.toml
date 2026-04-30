@@ -10,6 +10,9 @@ mc-core = { workspace = true }
 mc-vfs = { workspace = true }
 mc-vfs-archive = { workspace = true }
 mc-jobs = { workspace = true }
+mc-find = { workspace = true }
+mc-diff = { workspace = true }
+mc-vfs-net = { workspace = true }
 mc-config = { workspace = true }
 tokio-util = { workspace = true }
 ratatui = { workspace = true }
@@ -20,6 +23,9 @@ futures = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 which = "8"
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+arboard = { version = "3", default-features = false }
+base64 = "0.22"
 
 [lints]
 workspace = true

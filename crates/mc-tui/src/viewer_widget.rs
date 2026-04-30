@@ -28,6 +28,18 @@ pub struct ViewerWidget {
     mode: ViewerMode,
     offset: usize,
     truncated: bool,
+    /// Active search state: pattern + last index in `text_lines`. `None` =
+    /// no search; `Some` with empty pattern = prompt is open and user is typing.
+    search: Option<SearchState>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SearchState {
+    /// The pattern the user is typing (or has typed).
+    pattern: String,
+    /// `true` while the prompt is open. When `false`, the search has been
+    /// committed and arrow keys do scroll, while `n`/`N` advance.
+    typing: bool,
 }
 
 impl ViewerWidget {
@@ -57,14 +69,42 @@ impl ViewerWidget {
             mode: ViewerMode::Text,
             offset: 0,
             truncated,
+            search: None,
         })
     }
 
     /// Returns `true` if still open, `false` to close.
     pub fn handle_key(&mut self, chord: KeyChord) -> bool {
+        // Search prompt steals input while typing.
+        if let Some(state) = &mut self.search {
+            if state.typing {
+                match chord.code {
+                    KeyCode::Escape => {
+                        self.search = None;
+                    }
+                    KeyCode::Enter => {
+                        state.typing = false;
+                        if !state.pattern.is_empty() {
+                            self.find_from(self.offset, /*forward*/ true);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        state.pattern.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        state.pattern.push(c);
+                    }
+                    _ => {}
+                }
+                return true;
+            }
+        }
+
         match chord.code {
             KeyCode::Escape | KeyCode::F(10) | KeyCode::Char('q') => return false,
-            KeyCode::F(4) => self.mode = if self.mode == ViewerMode::Text { ViewerMode::Hex } else { ViewerMode::Text },
+            KeyCode::F(4) => {
+                self.mode = if self.mode == ViewerMode::Text { ViewerMode::Hex } else { ViewerMode::Text };
+            }
             KeyCode::Down | KeyCode::Char('j') => self.offset += 1,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.offset = self.offset.saturating_sub(1);
@@ -75,9 +115,43 @@ impl ViewerWidget {
             }
             KeyCode::Home => self.offset = 0,
             KeyCode::End => self.offset = usize::MAX,
+            KeyCode::Char('/') => {
+                self.search = Some(SearchState {
+                    pattern: String::new(),
+                    typing: true,
+                });
+            }
+            KeyCode::Char('n') => {
+                self.find_from(self.offset.saturating_add(1), true);
+            }
+            KeyCode::Char('N') => {
+                self.find_from(self.offset.saturating_sub(1), false);
+            }
             _ => {}
         }
         true
+    }
+
+    fn find_from(&mut self, start: usize, forward: bool) {
+        let pat = match &self.search {
+            Some(s) if !s.pattern.is_empty() => s.pattern.to_lowercase(),
+            _ => return,
+        };
+        let n = self.text_lines.len();
+        if n == 0 {
+            return;
+        }
+        let range: Box<dyn Iterator<Item = usize>> = if forward {
+            Box::new(start..n)
+        } else {
+            Box::new((0..start.min(n)).rev())
+        };
+        for i in range {
+            if self.text_lines[i].to_lowercase().contains(&pat) {
+                self.offset = i;
+                return;
+            }
+        }
     }
 
     pub fn render(&self, f: &mut Frame<'_>, area: Rect) {
@@ -110,13 +184,32 @@ impl ViewerWidget {
             chunks[0],
         );
 
-        let bar = Line::from(vec![
-            Span::styled("F4", Style::default().fg(Color::White).bg(Color::Black)),
-            Span::styled("Hex", Style::default().fg(Color::Black).bg(Color::Cyan)),
-            Span::raw("  "),
-            Span::styled("F10", Style::default().fg(Color::White).bg(Color::Black)),
-            Span::styled("Quit", Style::default().fg(Color::Black).bg(Color::Cyan)),
-        ]);
+        let bar = if let Some(state) = &self.search {
+            if state.typing {
+                Line::from(vec![
+                    Span::styled("/", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(state.pattern.clone(), Style::default().fg(Color::Black).bg(Color::Yellow)),
+                    Span::raw("    Enter: search   Esc: cancel"),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("found ", Style::default().fg(Color::White).bg(Color::Black)),
+                    Span::styled(state.pattern.clone(), Style::default().fg(Color::Yellow).bg(Color::Black).add_modifier(Modifier::BOLD)),
+                    Span::raw("    n: next   N: prev   /: new search   q: close"),
+                ])
+            }
+        } else {
+            Line::from(vec![
+                Span::styled("F4", Style::default().fg(Color::White).bg(Color::Black)),
+                Span::styled("Hex", Style::default().fg(Color::Black).bg(Color::Cyan)),
+                Span::raw("  "),
+                Span::styled("/", Style::default().fg(Color::White).bg(Color::Black)),
+                Span::styled("Search", Style::default().fg(Color::Black).bg(Color::Cyan)),
+                Span::raw("  "),
+                Span::styled("F10", Style::default().fg(Color::White).bg(Color::Black)),
+                Span::styled("Quit", Style::default().fg(Color::Black).bg(Color::Cyan)),
+            ])
+        };
         f.render_widget(
             Paragraph::new(bar).style(Style::default().bg(Color::Black).add_modifier(Modifier::DIM)),
             chunks[1],

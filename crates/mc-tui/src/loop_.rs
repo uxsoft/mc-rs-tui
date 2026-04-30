@@ -11,7 +11,9 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use mc_core::VPath;
+use mc_find::{FindEvent, Query};
 use mc_jobs::{CopyJob, DeleteJob, JobUpdateRx, MoveJob};
+use tokio_util::sync::CancellationToken;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::time::interval;
@@ -19,6 +21,7 @@ use tokio::time::interval;
 use crate::app::{App, Disposition, PendingOp};
 use crate::editor_spawn::{resolve_editor, spawn_editor};
 use crate::event::chord_from_crossterm;
+use crate::watcher::PanelWatcher;
 
 pub struct TerminalGuard {
     active: bool,
@@ -43,17 +46,29 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Wraps a tokio mpsc receiver of `FindEvent` so the loop can poll it alongside
+/// other event sources. `None` means no find is running.
+struct FindStream {
+    rx: tokio::sync::mpsc::Receiver<FindEvent>,
+    cancel: CancellationToken,
+}
+
 pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("init terminal")?;
 
+    app.ensure_remote_mount().await;
     app.refresh_both().await;
     update_title(&app);
 
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(33));
 
+    let mut find: Option<FindStream> = None;
+    let mut watcher = PanelWatcher::new();
+    let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    rearm_watcher(&app, &mut watcher, &watch_tx);
     let mut redraw = true;
 
     loop {
@@ -72,13 +87,16 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
                                 Disposition::Quit => break,
                                 Disposition::Redraw => redraw = true,
                                 Disposition::ReloadActive => {
+                                    app.ensure_remote_mount().await;
                                     app.refresh_active().await;
                                     update_title(&app);
+                                    rearm_watcher(&app, &mut watcher, &watch_tx);
                                     redraw = true;
                                 }
                                 Disposition::RunOp(op) => {
-                                    run_op(&mut app, &mut terminal, op).await;
+                                    run_op(&mut app, &mut terminal, op, &mut find).await;
                                     update_title(&app);
+                                    rearm_watcher(&app, &mut watcher, &watch_tx);
                                     redraw = true;
                                 }
                                 Disposition::None => {}
@@ -93,6 +111,23 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
                     }
                     None => break,
                 }
+            }
+            Some(()) = watch_rx.recv() => {
+                // Drain coalesced events.
+                while watch_rx.try_recv().is_ok() {}
+                app.refresh_active().await;
+                redraw = true;
+            }
+            Some(ev) = recv_find(&mut find) => {
+                match ev {
+                    FindEvent::Scanned(p) => app.find_set_status(format!("scanning {p}")),
+                    FindEvent::Matched(m) => app.find_push(m.path),
+                    FindEvent::Done => {
+                        app.find_finish();
+                        find = None;
+                    }
+                }
+                redraw = true;
             }
             Some(update) = job_rx.recv() => {
                 let mut finished = false;
@@ -113,16 +148,75 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
     Ok(())
 }
 
+fn rearm_watcher(
+    app: &App,
+    watcher: &mut PanelWatcher,
+    tx: &tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    let cwd = if app.active_left { &app.left.cwd } else { &app.right.cwd };
+    let layer = match cwd.last() {
+        Some(l) => l,
+        None => return,
+    };
+    if layer.scheme != "local" {
+        watcher.shutdown();
+        return;
+    }
+    watcher.watch(&layer.sub, tx.clone());
+}
+
 fn update_title(app: &App) {
     let cwd = if app.active_left { &app.left.cwd } else { &app.right.cwd };
     let title = format!("mc-rs: {cwd}");
     let _ = execute!(io::stdout(), SetTitle(title));
 }
 
+/// Suspend our crossterm raw/alt-screen state, run `sh -c <cmd>` synchronously
+/// in `cwd`, and restore the TUI on return.
+fn run_shell_command(cwd: &std::path::Path, cmd: &str) -> anyhow::Result<()> {
+    use std::io;
+    use std::process::Command;
+
+    use crossterm::execute;
+    use crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
+
+    execute!(io::stdout(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let status = Command::new(&shell)
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .status();
+
+    // After the child exits, ask the user to press Enter so they have a chance
+    // to read its output before we redraw.
+    println!("\n[mc-rs] press Enter to continue…");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_line(&mut buf);
+
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    let _ = status?;
+    Ok(())
+}
+
+async fn recv_find(find: &mut Option<FindStream>) -> Option<FindEvent> {
+    match find.as_mut() {
+        Some(fs) => fs.rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn run_op<B: ratatui::backend::Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
     op: PendingOp,
+    find: &mut Option<FindStream>,
 ) {
     match op {
         PendingOp::Mkdir { in_dir, name } => {
@@ -208,6 +302,84 @@ async fn run_op<B: ratatui::backend::Backend>(
             let desc = job.description_for_dialog();
             let handle = app.jobs.submit(Box::new(job));
             app.show_progress(handle, desc);
+        }
+        PendingOp::StartFind { start, params } => {
+            // Cancel any prior find.
+            if let Some(prev) = find.take() {
+                prev.cancel.cancel();
+            }
+            let vfs = match app.registry.root_for(&start) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("find: no backend: {e}");
+                    return;
+                }
+            };
+            let name_glob = if params.name_pattern.is_empty() || params.name_pattern == "*" {
+                None
+            } else {
+                match mc_find::build_name_glob(&params.name_pattern) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        tracing::warn!("bad glob {:?}: {e}", params.name_pattern);
+                        None
+                    }
+                }
+            };
+            let content = if params.content_pattern.is_empty() {
+                None
+            } else {
+                match mc_find::build_content_regex(
+                    &params.content_pattern,
+                    params.whole_word,
+                    !params.case_sensitive,
+                ) {
+                    Ok(r) => Some(mc_find::ContentQuery { regex: r }),
+                    Err(e) => {
+                        tracing::warn!("bad regex {:?}: {e}", params.content_pattern);
+                        None
+                    }
+                }
+            };
+            let ignore_dirs = params
+                .ignore_dirs
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            let q = Query {
+                start: start.clone(),
+                name_glob,
+                content,
+                ignore_dirs,
+                max_matches: 5000,
+            };
+            let summary = format!(
+                "name={} content={} in={}",
+                if params.name_pattern.is_empty() {
+                    "*".into()
+                } else {
+                    params.name_pattern.clone()
+                },
+                if params.content_pattern.is_empty() {
+                    "—".into()
+                } else {
+                    params.content_pattern.clone()
+                },
+                start,
+            );
+            app.show_find_results(summary);
+            let cancel = CancellationToken::new();
+            let rx = mc_find::run(vfs, q, cancel.clone());
+            *find = Some(FindStream { rx, cancel });
+        }
+        PendingOp::RunShell { cwd, cmd } => {
+            let _ = terminal.show_cursor();
+            if let Err(e) = run_shell_command(&cwd, &cmd) {
+                tracing::warn!("shell {cmd:?}: {e}");
+            }
+            let _ = terminal.clear();
+            app.refresh_both().await;
         }
         PendingOp::RunEditor { file, line } => {
             let editor = resolve_editor(app.config.editor.command.as_deref());

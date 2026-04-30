@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use mc_config::{AppConfig, ConfigPaths, FileHighlight, Hotlist};
+use mc_config::{
+    AppConfig, CompiledExtBindings, ConfigPaths, ExtAction, ExtBindings, FileHighlight, Hotlist,
+};
 use mc_core::action::SortKey;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use mc_core::{Entry, EntryKind, VPath};
@@ -16,8 +18,9 @@ use ratatui::Frame;
 use tracing::warn;
 
 use crate::dialog::{
-    ConfirmDialog, Dialog, DialogOutcome, HotlistAction, HotlistDialog, InputDialog,
-    MenuBar, MenuChoice, ProgressDialog,
+    ConfirmDialog, Dialog, DialogOutcome, FindForm, FindFormOutcome, FindParams, FindResults,
+    FindResultsOutcome, HotlistAction, HotlistDialog, InputDialog, MenuBar, MenuChoice,
+    ProgressDialog,
 };
 use crate::panel::{render_panel, PanelState};
 
@@ -33,6 +36,11 @@ pub enum PendingOp {
     SubmitMove { sources: Vec<VPath>, dst_dir: VPath },
     /// Submit a recursive delete job.
     SubmitDelete { targets: Vec<VPath> },
+    /// Start a Find over the active panel's cwd with the given form params.
+    StartFind { start: VPath, params: FindParams },
+    /// Run a shell command line with terminal suspend/restore. `cwd` is the
+    /// directory the command runs in; `cmd` already has `%`-macros expanded.
+    RunShell { cwd: PathBuf, cmd: String },
 }
 
 #[derive(Debug)]
@@ -60,6 +68,13 @@ enum Modal {
     Progress(ProgressDialog),
     Hotlist(HotlistDialog),
     Menu(MenuBar),
+    FindForm(FindForm),
+    FindResults(FindResults),
+    CmdLine(InputDialog),
+    UserMenu(crate::dialog::UserMenuDialog),
+    Diff(crate::diff_widget::DiffWidget),
+    Help(crate::dialog::HelpDialog),
+    QuickCd(InputDialog),
     Viewer(crate::viewer_widget::ViewerWidget),
     /// Type-ahead filter; `String` is the current filter.
     QuickSearch(String),
@@ -75,6 +90,7 @@ pub struct App {
     pub highlight: FileHighlight,
     pub hotlist: Hotlist,
     pub paths: ConfigPaths,
+    pub extbinds: CompiledExtBindings,
     modal: Modal,
 }
 
@@ -88,6 +104,12 @@ impl App {
         let (jobs, rx) = JobQueue::new(256);
         let paths = ConfigPaths::discover();
         let hotlist = Hotlist::load(&paths.config_dir.join("hotlist.toml")).unwrap_or_default();
+        let ext_cfg = ExtBindings::load(&paths.config_dir.join("extbind.toml"))
+            .unwrap_or_else(|e| {
+                tracing::warn!("extbind: load failed: {e}");
+                ExtBindings::defaults()
+            });
+        let extbinds = CompiledExtBindings::from_config(&ext_cfg);
         let app = Self {
             config,
             registry,
@@ -98,6 +120,7 @@ impl App {
             highlight: FileHighlight::defaults(),
             hotlist,
             paths,
+            extbinds,
             modal: Modal::None,
         };
         (app, rx)
@@ -114,6 +137,35 @@ impl App {
     /// Set the active modal to a progress dialog tracking the given handle.
     pub fn show_progress(&mut self, handle: mc_jobs::JobHandle, description: String) {
         self.modal = Modal::Progress(ProgressDialog::new(handle, description));
+    }
+
+    /// Replace the modal with a streaming Find results dialog.
+    pub fn show_find_results(&mut self, summary: String) {
+        self.modal = Modal::FindResults(FindResults::new(summary));
+    }
+
+    /// Append a result to the active find dialog. Silently no-ops otherwise.
+    pub fn find_push(&mut self, p: VPath) {
+        if let Modal::FindResults(r) = &mut self.modal {
+            r.push(p);
+        }
+    }
+
+    pub fn find_set_status(&mut self, s: impl Into<String>) {
+        if let Modal::FindResults(r) = &mut self.modal {
+            r.set_status(s);
+        }
+    }
+
+    pub fn find_finish(&mut self) {
+        if let Modal::FindResults(r) = &mut self.modal {
+            r.finish();
+        }
+    }
+
+    #[must_use]
+    pub fn modal_is_find_results(&self) -> bool {
+        matches!(self.modal, Modal::FindResults(_))
     }
 
     pub fn close_modal(&mut self) {
@@ -158,6 +210,49 @@ impl App {
             &self.left
         } else {
             &self.right
+        }
+    }
+
+    /// If the active panel's cwd has a remote scheme (`sftp`) whose mount is
+    /// not yet registered, connect and register it. Any auth / connection
+    /// failure logs a warning and is treated as if no backend exists (panel
+    /// will simply show empty).
+    pub async fn ensure_remote_mount(&mut self) {
+        // Look for the deepest layer whose backend is missing.
+        let panels = if self.active_left {
+            [&self.left, &self.right]
+        } else {
+            [&self.right, &self.left]
+        };
+        for panel in panels {
+            for layer in panel.cwd.layers() {
+                if layer.scheme != "sftp" {
+                    continue;
+                }
+                // Check both per-pair and per-scheme registries.
+                if self.registry.root_for(&panel.cwd).is_ok() {
+                    continue;
+                }
+                let endpoint = match mc_vfs_net::sftp::SftpEndpoint::parse(&layer.location) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("sftp endpoint parse: {e}");
+                        continue;
+                    }
+                };
+                match mc_vfs_net::SftpVfs::connect("sftp", endpoint).await {
+                    Ok(vfs) => {
+                        self.registry.register_mount(
+                            "sftp",
+                            layer.location.clone(),
+                            std::sync::Arc::new(vfs),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("sftp connect {}: {e}", layer.location);
+                    }
+                }
+            }
         }
     }
 
@@ -260,6 +355,69 @@ impl App {
                     Disposition::Redraw
                 }
             },
+            Modal::CmdLine(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::CmdLine(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(raw) => {
+                    let ctx = self.macro_ctx();
+                    let cmd = mc_core::substitute(&raw, &ctx);
+                    let cwd = self
+                        .active_ref()
+                        .cwd
+                        .last()
+                        .map(|l| l.sub.clone())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    Disposition::RunOp(PendingOp::RunShell { cwd, cmd })
+                }
+            },
+            Modal::UserMenu(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::UserMenu(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(template) => {
+                    let ctx = self.macro_ctx();
+                    let cmd = mc_core::substitute(&template, &ctx);
+                    let cwd = self
+                        .active_ref()
+                        .cwd
+                        .last()
+                        .map(|l| l.sub.clone())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    Disposition::RunOp(PendingOp::RunShell { cwd, cmd })
+                }
+            },
+            Modal::FindForm(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::FindForm(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(FindFormOutcome::Cancel) => Disposition::Redraw,
+                DialogOutcome::Submitted(FindFormOutcome::Start(params)) => {
+                    let start = self.active_ref().cwd.clone();
+                    Disposition::RunOp(PendingOp::StartFind { start, params })
+                }
+            },
+            Modal::FindResults(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::FindResults(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(FindResultsOutcome::Navigate(p)) => {
+                    // If `p` is a file, navigate to its parent dir and place
+                    // cursor on it on the next refresh (placement is best-effort
+                    // — we just cd to parent for now).
+                    let target = parent_path(&p).unwrap_or(p);
+                    self.active().navigate(target);
+                    Disposition::ReloadActive
+                }
+            },
             Modal::Menu(mut dlg) => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
                     self.modal = Modal::Menu(dlg);
@@ -324,6 +482,63 @@ impl App {
                     Disposition::Redraw
                 }
             }
+            Modal::Diff(mut d) => {
+                if d.handle_key(chord) {
+                    self.modal = Modal::Diff(d);
+                    Disposition::Redraw
+                } else {
+                    Disposition::Redraw
+                }
+            }
+            Modal::Help(mut d) => match d.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Help(d);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled | DialogOutcome::Submitted(()) => Disposition::Redraw,
+            },
+            Modal::QuickCd(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::QuickCd(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(s) => {
+                    let s = s.trim();
+                    let vp = if s.contains("://") || s.starts_with("local:") {
+                        s.parse::<VPath>().ok()
+                    } else if s.starts_with('/') || s.starts_with('~') {
+                        // Treat as a local path; expand a leading ~ for convenience.
+                        let expanded = if let Some(rest) = s.strip_prefix("~") {
+                            let home = std::env::var_os("HOME")
+                                .map(PathBuf::from)
+                                .unwrap_or_else(|| PathBuf::from("/"));
+                            home.join(rest.trim_start_matches('/'))
+                        } else {
+                            PathBuf::from(s)
+                        };
+                        Some(VPath::local(expanded))
+                    } else {
+                        // Relative: resolve against current cwd if local.
+                        if let Some(layer) = self.active_ref().cwd.last() {
+                            if layer.scheme == "local" {
+                                Some(VPath::local(layer.sub.join(s)))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(target) = vp {
+                        self.active().navigate(target);
+                        Disposition::ReloadActive
+                    } else {
+                        tracing::warn!("quick cd: could not parse {s:?}");
+                        Disposition::Redraw
+                    }
+                }
+            },
             Modal::QuickSearch(mut filter) => match (chord.code, chord.mods) {
                 (KeyCode::Escape, _) | (KeyCode::Enter, _) => Disposition::Redraw,
                 (KeyCode::Backspace, _) => {
@@ -381,6 +596,108 @@ impl App {
         }
     }
 
+    /// Open diff between the active panel's cursor file and the other panel's
+    /// cursor file. Both must be local regular files for this initial cut.
+    fn open_diff(&mut self) -> Disposition {
+        let active = self.active_ref();
+        let other = if self.active_left { &self.right } else { &self.left };
+        let lp = match active.cursor_path() {
+            Some(p) => p,
+            None => return Disposition::Redraw,
+        };
+        let rp = {
+            // Use other panel's cursor.
+            let layer = match other.cwd.last() {
+                Some(l) => l.clone(),
+                None => return Disposition::Redraw,
+            };
+            let name = match other.entries.get(other.cursor) {
+                Some(e) if e.name != ".." => e.name.clone(),
+                _ => return Disposition::Redraw,
+            };
+            let mut sub = layer.sub.clone();
+            sub.push(&name);
+            let mut new_layer = layer;
+            new_layer.sub = sub;
+            let mut p = other.cwd.clone();
+            p.pop_layer();
+            p.push_layer(new_layer);
+            p
+        };
+        let l_local = match vpath_to_local(&lp) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("diff: left path is not local");
+                return Disposition::Redraw;
+            }
+        };
+        let r_local = match vpath_to_local(&rp) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("diff: right path is not local");
+                return Disposition::Redraw;
+            }
+        };
+        match crate::diff_widget::DiffWidget::open(&l_local, &r_local) {
+            Ok(d) => {
+                self.modal = Modal::Diff(d);
+                Disposition::Redraw
+            }
+            Err(e) => {
+                tracing::warn!("diff open: {e}");
+                Disposition::Redraw
+            }
+        }
+    }
+
+    /// Expand `template` against the active panel's macro context and dispatch
+    /// a [`PendingOp::RunShell`] to execute it.
+    fn run_template(&self, template: &str) -> Disposition {
+        let ctx = self.macro_ctx();
+        let cmd = mc_core::substitute(template, &ctx);
+        let cwd = self
+            .active_ref()
+            .cwd
+            .last()
+            .map(|l| l.sub.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
+        Disposition::RunOp(PendingOp::RunShell { cwd, cmd })
+    }
+
+    fn macro_ctx(&self) -> mc_core::MacroCtx {
+        let active = self.active_ref();
+        let other = if self.active_left { &self.right } else { &self.left };
+        let current = active
+            .entries
+            .get(active.cursor)
+            .filter(|e| e.name != "..")
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let other_current = other
+            .entries
+            .get(other.cursor)
+            .filter(|e| e.name != "..")
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let cwd = active
+            .cwd
+            .last()
+            .map(|l| l.sub.display().to_string())
+            .unwrap_or_default();
+        let other_cwd = other
+            .cwd
+            .last()
+            .map(|l| l.sub.display().to_string())
+            .unwrap_or_default();
+        mc_core::MacroCtx {
+            cwd,
+            current,
+            marked: active.marks.iter().cloned().collect(),
+            other_cwd,
+            other_current,
+        }
+    }
+
     fn handle_menu_choice(&mut self, c: MenuChoice) -> Disposition {
         // Translate the menu pick into the equivalent panel-mode key chord.
         let chord = match c {
@@ -396,7 +713,7 @@ impl App {
             MenuChoice::SortCycle => KeyChord::new(KeyCode::Char('s'), KeyMods::ALT),
             MenuChoice::ToggleListingMode => KeyChord::new(KeyCode::Char('t'), KeyMods::ALT),
             MenuChoice::Find => {
-                tracing::info!("Find: not implemented yet");
+                self.modal = Modal::FindForm(FindForm::new(FindParams::default()));
                 return Disposition::Redraw;
             }
             MenuChoice::Chmod => {
@@ -448,6 +765,43 @@ impl App {
                     .map_or(p.clone(), |(_, n)| n.to_string());
                 self.hotlist.add(label, p);
                 self.save_hotlist();
+                Disposition::Redraw
+            }
+            (KeyCode::Char('d'), m) | (KeyCode::Char('D'), m)
+                if m.is_empty() || m == KeyMods::SHIFT =>
+            {
+                self.open_diff()
+            }
+            (KeyCode::Char('p'), m) | (KeyCode::Char('P'), m)
+                if m.is_empty() || m == KeyMods::SHIFT =>
+            {
+                let cwd = self
+                    .active_ref()
+                    .cwd
+                    .last()
+                    .map(|l| l.sub.display().to_string())
+                    .unwrap_or_default();
+                let _ = crate::clipboard::copy(&cwd);
+                Disposition::Redraw
+            }
+            (KeyCode::Char('t'), m) | (KeyCode::Char('T'), m)
+                if m.is_empty() || m == KeyMods::SHIFT =>
+            {
+                let active = self.active_ref();
+                let mut full = active
+                    .cwd
+                    .last()
+                    .map(|l| l.sub.display().to_string())
+                    .unwrap_or_default();
+                if let Some(e) = active.entries.get(active.cursor) {
+                    if e.name != ".." {
+                        if !full.ends_with('/') && !full.is_empty() {
+                            full.push('/');
+                        }
+                        full.push_str(&e.name);
+                    }
+                }
+                let _ = crate::clipboard::copy(&full);
                 Disposition::Redraw
             }
             _ => Disposition::Redraw,
@@ -565,12 +919,17 @@ impl App {
                             return Disposition::ReloadActive;
                         }
                     } else if matches!(e.kind, EntryKind::File) {
-                        // Try mounting archives.
-                        if let Some(t) = target {
-                            if let Some(mounted) = self.try_mount_archive(&t) {
+                        // 1) Archive auto-mount.
+                        if let Some(t) = &target {
+                            if let Some(mounted) = self.try_mount_archive(t) {
                                 self.active().navigate(mounted);
                                 return Disposition::ReloadActive;
                             }
+                        }
+                        // 2) Configured Open binding.
+                        if let Some(template) = self.extbinds.lookup(&e.name, ExtAction::Open) {
+                            let template = template.to_string();
+                            return self.run_template(&template);
                         }
                     }
                 }
@@ -652,6 +1011,40 @@ impl App {
                 Disposition::Redraw
             }
 
+            // Alt-? — Find file
+            (KeyCode::Char('?'), m) if m == KeyMods::ALT || m == KeyMods::ALT | KeyMods::SHIFT => {
+                self.modal = Modal::FindForm(FindForm::new(FindParams::default()));
+                Disposition::Redraw
+            }
+
+            // F1 — Help
+            (KeyCode::F(1), m) if m.is_empty() => {
+                self.modal = Modal::Help(crate::dialog::HelpDialog::new());
+                Disposition::Redraw
+            }
+
+            // Alt-C — Quick cd (typed path; supports local + sftp:// URLs)
+            (KeyCode::Char('c'), m) if m == KeyMods::ALT => {
+                self.modal = Modal::QuickCd(InputDialog::new(
+                    " Quick cd ",
+                    "Path or URL (e.g. /tmp, sftp://user@host/srv):",
+                    String::new(),
+                ));
+                Disposition::Redraw
+            }
+
+            // F2 — User menu
+            (KeyCode::F(2), m) if m.is_empty() => {
+                self.modal = Modal::UserMenu(crate::dialog::UserMenuDialog::with_defaults());
+                Disposition::Redraw
+            }
+
+            // ":" — open the command line
+            (KeyCode::Char(':'), m) if m.is_empty() || m == KeyMods::SHIFT => {
+                self.modal = Modal::CmdLine(InputDialog::new(" Command ", "$", String::new()));
+                Disposition::Redraw
+            }
+
             // History
             (KeyCode::Char('y'), m) if m == KeyMods::ALT => {
                 if self.active().history_back() {
@@ -670,7 +1063,14 @@ impl App {
 
             // F3 — View
             (KeyCode::F(3), m) if m.is_empty() => {
-                if let Some(target) = self.active_ref().cursor_path() {
+                let entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
+                let target = self.active_ref().cursor_path();
+                if let (Some(e), Some(target)) = (entry, target) {
+                    // Configured View binding takes precedence over the built-in viewer.
+                    if let Some(template) = self.extbinds.lookup(&e.name, ExtAction::View) {
+                        let template = template.to_string();
+                        return self.run_template(&template);
+                    }
                     if let Some(local) = vpath_to_local(&target) {
                         match crate::viewer_widget::ViewerWidget::open(&local) {
                             Ok(v) => {
@@ -816,7 +1216,7 @@ impl App {
         render_panel(f, panels[1], &mut self.right, &self.highlight);
         render_buttonbar(f, chunks[1]);
 
-        match &self.modal {
+        match &mut self.modal {
             Modal::None | Modal::PrefixCtrlX => {}
             Modal::Mkdir(d) | Modal::Rename(d, _) => d.render(f, area),
             Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => dlg.render(f, area),
@@ -825,6 +1225,13 @@ impl App {
             Modal::Progress(d) => d.render(f, area),
             Modal::Hotlist(d) => d.render(f, area),
             Modal::Menu(d) => d.render(f, area),
+            Modal::FindForm(d) => d.render(f, area),
+            Modal::FindResults(d) => d.render(f, area),
+            Modal::CmdLine(d) => d.render(f, area),
+            Modal::UserMenu(d) => d.render(f, area),
+            Modal::Diff(d) => d.render(f, area),
+            Modal::Help(d) => d.render(f, area),
+            Modal::QuickCd(d) => d.render(f, area),
             Modal::QuickSearch(filter) => render_quick_search(f, area, filter),
         }
         if matches!(self.modal, Modal::PrefixCtrlX) {
@@ -863,20 +1270,6 @@ fn next_sort(s: SortKey) -> SortKey {
         SortKey::Ctime => SortKey::Unsorted,
         SortKey::Unsorted | SortKey::Inode => SortKey::Name,
     }
-}
-
-fn parent_path(p: &VPath) -> Option<VPath> {
-    let last = p.last()?.clone();
-    let mut sub = last.sub.clone();
-    if !sub.pop() {
-        return None;
-    }
-    let mut new_layer = last;
-    new_layer.sub = sub;
-    let mut new_path = p.clone();
-    new_path.pop_layer();
-    new_path.push_layer(new_layer);
-    Some(new_path)
 }
 
 fn child_path(parent: &VPath, name: &str) -> Option<VPath> {
@@ -939,6 +1332,20 @@ pub fn vpath_to_local(p: &VPath) -> Option<PathBuf> {
         return None;
     }
     Some(layer.sub.clone())
+}
+
+pub fn parent_path(p: &VPath) -> Option<VPath> {
+    let last = p.last()?.clone();
+    let mut sub = last.sub.clone();
+    if !sub.pop() {
+        return None;
+    }
+    let mut new_layer = last;
+    new_layer.sub = sub;
+    let mut new_path = p.clone();
+    new_path.pop_layer();
+    new_path.push_layer(new_layer);
+    Some(new_path)
 }
 
 async fn read_dir_with_parent(vfs: &dyn Vfs, p: &VPath) -> mc_core::Result<Vec<Entry>> {

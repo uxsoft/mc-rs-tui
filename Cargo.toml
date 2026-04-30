@@ -4,7 +4,10 @@ members = [
     "crates/mc-core",
     "crates/mc-vfs",
     "crates/mc-vfs-archive",
+    "crates/mc-vfs-net",
     "crates/mc-jobs",
+    "crates/mc-find",
+    "crates/mc-diff",
     "crates/mc-config",
     "crates/mc-tui",
     "crates/mc",
@@ -22,7 +25,10 @@ rust-version = "1.85"
 mc-core = { path = "crates/mc-core" }
 mc-vfs = { path = "crates/mc-vfs" }
 mc-vfs-archive = { path = "crates/mc-vfs-archive" }
+mc-vfs-net = { path = "crates/mc-vfs-net" }
 mc-jobs = { path = "crates/mc-jobs" }
+mc-find = { path = "crates/mc-find" }
+mc-diff = { path = "crates/mc-diff" }
 mc-config = { path = "crates/mc-config" }
 mc-tui = { path = "crates/mc-tui" }
 
@@ -44,6 +50,8 @@ color-eyre = "0.6"
 clap = { version = "4", features = ["derive"] }
 bitflags = { version = "2", features = ["serde"] }
 smallvec = { version = "1", features = ["serde"] }
+globset = "0.4"
+regex = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
