@@ -1,10 +1,12 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use mc_config::AppConfig;
+use mc_config::{AppConfig, ConfigPaths, FileHighlight, Hotlist};
 use mc_core::action::SortKey;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use mc_core::{Entry, EntryKind, VPath};
+use mc_jobs::{JobQueue, JobUpdateRx};
 use mc_vfs::{Registry, Vfs};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
@@ -13,17 +15,24 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use tracing::warn;
 
-use crate::dialog::{ConfirmDialog, Dialog, DialogOutcome, InputDialog};
+use crate::dialog::{
+    ConfirmDialog, Dialog, DialogOutcome, HotlistAction, HotlistDialog, InputDialog,
+    MenuBar, MenuChoice, ProgressDialog,
+};
 use crate::panel::{render_panel, PanelState};
 
 #[derive(Debug, Clone)]
 pub enum PendingOp {
     Mkdir { in_dir: VPath, name: String },
-    Delete { targets: Vec<VPath> },
     Rename { src: VPath, new_name: String },
-    Copy { src: VPath, dst_dir: VPath },
     Chmod { targets: Vec<VPath>, mode: u32 },
     RunEditor { file: PathBuf, line: Option<u32> },
+    /// Submit a recursive copy job.
+    SubmitCopy { sources: Vec<VPath>, dst_dir: VPath },
+    /// Submit a recursive move job.
+    SubmitMove { sources: Vec<VPath>, dst_dir: VPath },
+    /// Submit a recursive delete job.
+    SubmitDelete { targets: Vec<VPath> },
 }
 
 #[derive(Debug)]
@@ -47,6 +56,10 @@ enum Modal {
     Chmod { dlg: InputDialog, targets: Vec<VPath> },
     /// Two-step Ctrl-X chord: waiting for the second key.
     PrefixCtrlX,
+    /// A long-running job is in flight (or just finished).
+    Progress(ProgressDialog),
+    Hotlist(HotlistDialog),
+    Menu(MenuBar),
     Viewer(crate::viewer_widget::ViewerWidget),
     /// Type-ahead filter; `String` is the current filter.
     QuickSearch(String),
@@ -58,24 +71,78 @@ pub struct App {
     pub left: PanelState,
     pub right: PanelState,
     pub active_left: bool,
+    pub jobs: JobQueue,
+    pub highlight: FileHighlight,
+    pub hotlist: Hotlist,
+    pub paths: ConfigPaths,
     modal: Modal,
 }
 
 impl App {
-    pub fn new(config: AppConfig, start: PathBuf) -> Self {
+    pub fn new(config: AppConfig, start: PathBuf) -> (Self, JobUpdateRx) {
         let registry = Registry::with_defaults();
         let cwd = VPath::local(start);
         let mut left = PanelState::new(cwd.clone());
         let right = PanelState::new(cwd);
         left.active = true;
-        Self {
+        let (jobs, rx) = JobQueue::new(256);
+        let paths = ConfigPaths::discover();
+        let hotlist = Hotlist::load(&paths.config_dir.join("hotlist.toml")).unwrap_or_default();
+        let app = Self {
             config,
             registry,
             left,
             right,
             active_left: true,
+            jobs,
+            highlight: FileHighlight::defaults(),
+            hotlist,
+            paths,
             modal: Modal::None,
+        };
+        (app, rx)
+    }
+
+    fn save_hotlist(&self) {
+        let path = self.paths.config_dir.join("hotlist.toml");
+        if let Err(e) = self.hotlist.save(&path) {
+            tracing::warn!("save hotlist {}: {e}", path.display());
         }
+    }
+
+    /// Receive a job update; returns true if the modal should stay visible.
+    /// Set the active modal to a progress dialog tracking the given handle.
+    pub fn show_progress(&mut self, handle: mc_jobs::JobHandle, description: String) {
+        self.modal = Modal::Progress(ProgressDialog::new(handle, description));
+    }
+
+    pub fn close_modal(&mut self) {
+        self.modal = Modal::None;
+    }
+
+    pub fn handle_job_update(&mut self, update: mc_jobs::JobUpdate) {
+        if let Modal::Progress(dlg) = &mut self.modal {
+            if dlg.handle.id != update.id {
+                return;
+            }
+            match update.kind {
+                mc_jobs::JobUpdateKind::Started { description } => dlg.description = description,
+                mc_jobs::JobUpdateKind::Progress(p) => dlg.progress = p,
+                mc_jobs::JobUpdateKind::Status(s) => dlg.status = s,
+                mc_jobs::JobUpdateKind::Log(_) => {}
+                mc_jobs::JobUpdateKind::Finished(o) => dlg.finished = Some(o),
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn modal_is_progress(&self) -> bool {
+        matches!(self.modal, Modal::Progress(_))
+    }
+
+    #[must_use]
+    pub fn progress_finished(&self) -> bool {
+        matches!(&self.modal, Modal::Progress(d) if d.finished.is_some())
     }
 
     fn active(&mut self) -> &mut PanelState {
@@ -148,7 +215,9 @@ impl App {
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled | DialogOutcome::Submitted(false) => Disposition::Redraw,
-                DialogOutcome::Submitted(true) => Disposition::RunOp(PendingOp::Delete { targets }),
+                DialogOutcome::Submitted(true) => {
+                    Disposition::RunOp(PendingOp::SubmitDelete { targets })
+                }
             },
             Modal::Chmod { mut dlg, targets } => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
@@ -191,6 +260,62 @@ impl App {
                     Disposition::Redraw
                 }
             },
+            Modal::Menu(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Menu(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(choice) => self.handle_menu_choice(choice),
+            },
+            Modal::Hotlist(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Hotlist(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(action) => {
+                    match action {
+                        HotlistAction::AddCurrent => {
+                            let p = self.active_ref().cwd.to_string();
+                            let label = p
+                                .rsplit_once(['/', '\\'])
+                                .map_or(p.clone(), |(_, n)| n.to_string());
+                            self.hotlist.add(label, p);
+                            self.save_hotlist();
+                            self.modal = Modal::Hotlist(HotlistDialog::new(self.hotlist.clone()));
+                            Disposition::Redraw
+                        }
+                        HotlistAction::Remove(idx) => {
+                            self.hotlist.remove_at(idx);
+                            self.save_hotlist();
+                            self.modal = Modal::Hotlist(HotlistDialog::new(self.hotlist.clone()));
+                            Disposition::Redraw
+                        }
+                        HotlistAction::Navigate(s) => {
+                            if let Ok(p) = s.parse::<VPath>() {
+                                self.active().navigate(p);
+                                Disposition::ReloadActive
+                            } else {
+                                tracing::warn!("hotlist: bad vpath {s:?}");
+                                Disposition::Redraw
+                            }
+                        }
+                    }
+                }
+            },
+            Modal::Progress(dlg) => match (chord.code, dlg.finished.is_some()) {
+                (KeyCode::Escape, false) => {
+                    dlg.handle.cancel();
+                    self.modal = Modal::Progress(dlg);
+                    Disposition::Redraw
+                }
+                (KeyCode::Escape, true) | (KeyCode::Enter, _) => Disposition::Redraw,
+                _ => {
+                    self.modal = Modal::Progress(dlg);
+                    Disposition::None
+                }
+            },
             Modal::Viewer(mut v) => {
                 if v.handle_key(chord) {
                     self.modal = Modal::Viewer(v);
@@ -221,10 +346,60 @@ impl App {
         }
     }
 
-    fn handle_ctrl_x(&mut self, chord: KeyChord) -> Disposition {
-        // mc Ctrl-X chords; we only implement a few here (more in Phase 2/11).
-        match (chord.code, chord.mods) {
-            (KeyCode::Char('c'), m) | (KeyCode::Char('C'), m) if m.is_empty() || m == KeyMods::SHIFT => {
+    /// If `target` points at a known archive on a local FS, mount it and
+    /// return a [`VPath`] pointing at the archive's root inside the mount.
+    fn try_mount_archive(&mut self, target: &VPath) -> Option<VPath> {
+        // Only local files are mountable in Phase 7.
+        let local_path = vpath_to_local(target)?;
+        let kind = mc_vfs_archive::ArchiveKind::detect(&local_path)?;
+        let scheme: &'static str = match kind {
+            mc_vfs_archive::ArchiveKind::Tar
+            | mc_vfs_archive::ArchiveKind::TarGz
+            | mc_vfs_archive::ArchiveKind::TarBz2
+            | mc_vfs_archive::ArchiveKind::TarXz
+            | mc_vfs_archive::ArchiveKind::TarZst => "tar",
+            mc_vfs_archive::ArchiveKind::Zip => "zip",
+        };
+        let mount_id = next_mount_id();
+        let location = format!("mount-{mount_id}");
+        match mc_vfs_archive::mount_local(&local_path, kind, scheme) {
+            Ok(vfs) => {
+                self.registry
+                    .register_mount(scheme, location.clone(), vfs);
+                let mut p = target.clone();
+                p.push_layer(mc_core::path::Layer {
+                    scheme: scheme.to_string(),
+                    location,
+                    sub: "/".into(),
+                });
+                Some(p)
+            }
+            Err(e) => {
+                tracing::warn!("mount {} ({:?}): {e}", local_path.display(), kind);
+                None
+            }
+        }
+    }
+
+    fn handle_menu_choice(&mut self, c: MenuChoice) -> Disposition {
+        // Translate the menu pick into the equivalent panel-mode key chord.
+        let chord = match c {
+            MenuChoice::View => KeyChord::plain(KeyCode::F(3)),
+            MenuChoice::Edit => KeyChord::plain(KeyCode::F(4)),
+            MenuChoice::Copy => KeyChord::plain(KeyCode::F(5)),
+            MenuChoice::Move => KeyChord::plain(KeyCode::F(6)),
+            MenuChoice::Mkdir => KeyChord::plain(KeyCode::F(7)),
+            MenuChoice::Delete => KeyChord::plain(KeyCode::F(8)),
+            MenuChoice::Quit => return Disposition::Quit,
+            MenuChoice::Hotlist => KeyChord::new(KeyCode::Char('\\'), KeyMods::CTRL),
+            MenuChoice::ToggleHidden => KeyChord::new(KeyCode::Char('.'), KeyMods::CTRL),
+            MenuChoice::SortCycle => KeyChord::new(KeyCode::Char('s'), KeyMods::ALT),
+            MenuChoice::ToggleListingMode => KeyChord::new(KeyCode::Char('t'), KeyMods::ALT),
+            MenuChoice::Find => {
+                tracing::info!("Find: not implemented yet");
+                return Disposition::Redraw;
+            }
+            MenuChoice::Chmod => {
                 let targets = self.selected_targets();
                 if targets.is_empty() {
                     return Disposition::Redraw;
@@ -233,6 +408,46 @@ impl App {
                     dlg: InputDialog::new(" Chmod ", "Octal mode (e.g. 755):", "644"),
                     targets,
                 };
+                return Disposition::Redraw;
+            }
+            MenuChoice::AddToHotlist => {
+                let p = self.active_ref().cwd.to_string();
+                let label = p
+                    .rsplit_once(['/', '\\'])
+                    .map_or(p.clone(), |(_, n)| n.to_string());
+                self.hotlist.add(label, p);
+                self.save_hotlist();
+                return Disposition::Redraw;
+            }
+        };
+        self.handle_panel_key(chord)
+    }
+
+    fn handle_ctrl_x(&mut self, chord: KeyChord) -> Disposition {
+        // mc Ctrl-X chords; we only implement a few here (more in Phase 11).
+        match (chord.code, chord.mods) {
+            (KeyCode::Char('c'), m) | (KeyCode::Char('C'), m)
+                if m.is_empty() || m == KeyMods::SHIFT =>
+            {
+                let targets = self.selected_targets();
+                if targets.is_empty() {
+                    return Disposition::Redraw;
+                }
+                self.modal = Modal::Chmod {
+                    dlg: InputDialog::new(" Chmod ", "Octal mode (e.g. 755):", "644"),
+                    targets,
+                };
+                Disposition::Redraw
+            }
+            (KeyCode::Char('h'), m) | (KeyCode::Char('H'), m)
+                if m.is_empty() || m == KeyMods::SHIFT =>
+            {
+                let p = self.active_ref().cwd.to_string();
+                let label = p
+                    .rsplit_once(['/', '\\'])
+                    .map_or(p.clone(), |(_, n)| n.to_string());
+                self.hotlist.add(label, p);
+                self.save_hotlist();
                 Disposition::Redraw
             }
             _ => Disposition::Redraw,
@@ -343,10 +558,19 @@ impl App {
             (KeyCode::Enter, _) => {
                 let cursor_entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
                 if let Some(e) = cursor_entry {
+                    let target = self.active_ref().cursor_path();
                     if matches!(e.kind, EntryKind::Dir) {
-                        if let Some(target) = self.active_ref().cursor_path() {
-                            self.active().navigate(target);
+                        if let Some(t) = target {
+                            self.active().navigate(t);
                             return Disposition::ReloadActive;
+                        }
+                    } else if matches!(e.kind, EntryKind::File) {
+                        // Try mounting archives.
+                        if let Some(t) = target {
+                            if let Some(mounted) = self.try_mount_archive(&t) {
+                                self.active().navigate(mounted);
+                                return Disposition::ReloadActive;
+                            }
                         }
                     }
                 }
@@ -355,6 +579,18 @@ impl App {
             (KeyCode::Backspace, _) => {
                 if let Some(target) = parent_path(&self.active_ref().cwd) {
                     self.active().navigate(target);
+                    return Disposition::ReloadActive;
+                }
+                // At the root of the current layer; if we're inside an archive,
+                // pop the archive layer to return to the parent FS.
+                if self.active_ref().cwd.layers().len() > 1 {
+                    let mut new_cwd = self.active_ref().cwd.clone();
+                    if let Some(layer) = new_cwd.pop_layer() {
+                        // Best-effort cleanup — keep the mount registered so
+                        // re-entering is fast; mounts are tiny.
+                        let _ = layer;
+                    }
+                    self.active().navigate(new_cwd);
                     return Disposition::ReloadActive;
                 }
                 Disposition::None
@@ -404,6 +640,18 @@ impl App {
                 Disposition::Redraw
             }
 
+            // Ctrl-\ — hotlist
+            (KeyCode::Char('\\'), m) if m == KeyMods::CTRL => {
+                self.modal = Modal::Hotlist(HotlistDialog::new(self.hotlist.clone()));
+                Disposition::Redraw
+            }
+
+            // F9 — menu bar
+            (KeyCode::F(9), m) if m.is_empty() => {
+                self.modal = Modal::Menu(MenuBar::new());
+                Disposition::Redraw
+            }
+
             // History
             (KeyCode::Char('y'), m) if m == KeyMods::ALT => {
                 if self.active().history_back() {
@@ -449,42 +697,48 @@ impl App {
                 Disposition::None
             }
 
-            // F5 — copy single (basic, sync). Phase 2 upgrades to job queue.
+            // F5 — copy (recursive, via job queue)
             (KeyCode::F(5), m) if m.is_empty() => {
-                if let Some(src) = self.active_ref().cursor_path() {
-                    let entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
-                    if let Some(e) = entry {
-                        if e.name != ".." && !matches!(e.kind, EntryKind::Dir) {
-                            let dst_dir = if self.active_left {
-                                self.right.cwd.clone()
-                            } else {
-                                self.left.cwd.clone()
-                            };
-                            return Disposition::RunOp(PendingOp::Copy { src, dst_dir });
-                        }
-                    }
+                let sources = self.selected_targets();
+                if sources.is_empty() {
+                    return Disposition::None;
                 }
-                Disposition::None
+                let dst_dir = if self.active_left {
+                    self.right.cwd.clone()
+                } else {
+                    self.left.cwd.clone()
+                };
+                Disposition::RunOp(PendingOp::SubmitCopy { sources, dst_dir })
             }
 
-            // F6 — rename
+            // F6 — when a single non-".." entry is targeted in same dir → rename dialog.
+            // Otherwise: move to other panel (recursive job).
             (KeyCode::F(6), m) if m.is_empty() => {
-                let entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
-                let src = self.active_ref().cursor_path();
-                if let (Some(e), Some(src)) = (entry, src) {
-                    if e.name != ".." {
-                        self.modal = Modal::Rename(
-                            InputDialog::new(
-                                " Rename ",
-                                "New name:",
-                                e.name.clone(),
-                            ),
-                            src,
-                        );
-                        return Disposition::Redraw;
-                    }
+                let sources = self.selected_targets();
+                if sources.is_empty() {
+                    return Disposition::None;
                 }
-                Disposition::None
+                if sources.len() == 1 && self.active_ref().marks.is_empty() {
+                    // Single cursored item → rename dialog (mc behaviour).
+                    let entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
+                    let src = sources.into_iter().next().unwrap();
+                    if let Some(e) = entry {
+                        if e.name != ".." {
+                            self.modal = Modal::Rename(
+                                InputDialog::new(" Rename ", "New name:", e.name),
+                                src,
+                            );
+                            return Disposition::Redraw;
+                        }
+                    }
+                    return Disposition::None;
+                }
+                let dst_dir = if self.active_left {
+                    self.right.cwd.clone()
+                } else {
+                    self.left.cwd.clone()
+                };
+                Disposition::RunOp(PendingOp::SubmitMove { sources, dst_dir })
             }
 
             // + select group, \\ unselect group
@@ -536,6 +790,11 @@ impl App {
                 );
                 Disposition::Redraw
             }
+            // Esc closes a finished progress dialog.
+            (KeyCode::Escape, _) if self.progress_finished() => {
+                self.modal = Modal::None;
+                Disposition::Redraw
+            }
 
             _ => Disposition::None,
         }
@@ -553,8 +812,8 @@ impl App {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[0]);
 
-        render_panel(f, panels[0], &mut self.left);
-        render_panel(f, panels[1], &mut self.right);
+        render_panel(f, panels[0], &mut self.left, &self.highlight);
+        render_panel(f, panels[1], &mut self.right, &self.highlight);
         render_buttonbar(f, chunks[1]);
 
         match &self.modal {
@@ -563,6 +822,9 @@ impl App {
             Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => dlg.render(f, area),
             Modal::DeleteConfirm(d, _) => d.render(f, area),
             Modal::Viewer(v) => v.render(f, area),
+            Modal::Progress(d) => d.render(f, area),
+            Modal::Hotlist(d) => d.render(f, area),
+            Modal::Menu(d) => d.render(f, area),
             Modal::QuickSearch(filter) => render_quick_search(f, area, filter),
         }
         if matches!(self.modal, Modal::PrefixCtrlX) {
@@ -627,6 +889,11 @@ fn child_path(parent: &VPath, name: &str) -> Option<VPath> {
     new.pop_layer();
     new.push_layer(new_layer);
     Some(new)
+}
+
+fn next_mount_id() -> u64 {
+    static N: AtomicU64 = AtomicU64::new(1);
+    N.fetch_add(1, Ordering::Relaxed)
 }
 
 fn parse_octal_mode(s: &str) -> Option<u32> {

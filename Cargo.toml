@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/mc-core",
     "crates/mc-vfs",
+    "crates/mc-vfs-archive",
     "crates/mc-jobs",
     "crates/mc-config",
     "crates/mc-tui",
@@ -20,6 +21,7 @@ rust-version = "1.85"
 # Internal crates
 mc-core = { path = "crates/mc-core" }
 mc-vfs = { path = "crates/mc-vfs" }
+mc-vfs-archive = { path = "crates/mc-vfs-archive" }
 mc-jobs = { path = "crates/mc-jobs" }
 mc-config = { path = "crates/mc-config" }
 mc-tui = { path = "crates/mc-tui" }

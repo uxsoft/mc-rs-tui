@@ -5,6 +5,7 @@ pub mod sort;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use mc_config::FileHighlight;
 use mc_core::action::SortKey;
 use mc_core::{Entry, EntryKind, VPath};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -161,7 +162,12 @@ impl PanelState {
     }
 }
 
-pub fn render_panel(f: &mut Frame<'_>, area: Rect, state: &mut PanelState) {
+pub fn render_panel(
+    f: &mut Frame<'_>,
+    area: Rect,
+    state: &mut PanelState,
+    highlight: &FileHighlight,
+) {
     let title_style = if state.active {
         Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
@@ -203,7 +209,7 @@ pub fn render_panel(f: &mut Frame<'_>, area: Rect, state: &mut PanelState) {
         }
     }
 
-    let lines = render_entries(state, body_area.width as usize, height);
+    let lines = render_entries(state, body_area.width as usize, height, highlight);
     let para = Paragraph::new(lines).style(Style::default().bg(Color::Blue));
     f.render_widget(para, body_area);
 
@@ -218,14 +224,19 @@ pub fn render_panel(f: &mut Frame<'_>, area: Rect, state: &mut PanelState) {
     f.render_widget(status_line, status_area);
 }
 
-fn render_entries(state: &PanelState, width: usize, height: usize) -> Vec<Line<'static>> {
+fn render_entries(
+    state: &PanelState,
+    width: usize,
+    height: usize,
+    highlight: &FileHighlight,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(height);
     let end = (state.view_offset + height).min(state.entries.len());
     for i in state.view_offset..end {
         let e = &state.entries[i];
         let is_cursor = i == state.cursor && state.active;
         let is_marked = state.marks.contains(&e.name);
-        lines.push(format_line(e, state.mode, width, is_cursor, is_marked));
+        lines.push(format_line(e, state.mode, width, is_cursor, is_marked, highlight));
     }
     lines
 }
@@ -236,8 +247,9 @@ fn format_line(
     width: usize,
     is_cursor: bool,
     is_marked: bool,
+    highlight: &FileHighlight,
 ) -> Line<'static> {
-    let mut style = entry_style(e);
+    let mut style = entry_style(e, highlight);
     if is_marked {
         style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
     }
@@ -262,7 +274,7 @@ fn format_line(
     Line::from(Span::styled(text, style))
 }
 
-fn entry_style(e: &Entry) -> Style {
+fn entry_style(e: &Entry, highlight: &FileHighlight) -> Style {
     let base = Style::default().fg(Color::White).bg(Color::Blue);
     match e.kind {
         EntryKind::Dir => base.add_modifier(Modifier::BOLD),
@@ -275,7 +287,16 @@ fn entry_style(e: &Entry) -> Style {
                     return base.fg(Color::Green);
                 }
             }
-            base
+            // File-highlight by extension group.
+            match highlight.classify(&e.name) {
+                Some("archive") => base.fg(Color::Red),
+                Some("image") => base.fg(Color::Magenta),
+                Some("audio") | Some("video") => base.fg(Color::LightMagenta),
+                Some("doc") => base.fg(Color::White).add_modifier(Modifier::BOLD),
+                Some("source") => base.fg(Color::LightCyan),
+                Some("build") => base.fg(Color::Yellow),
+                _ => base,
+            }
         }
         EntryKind::Other => base,
     }

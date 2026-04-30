@@ -43,8 +43,8 @@ fn main() -> Result<()> {
 
     runtime.block_on(async move {
         let config = AppConfig::default();
-        let app = App::new(config, start);
-        mc_tui::run(app).await
+        let (app, job_rx) = App::new(config, start);
+        mc_tui::run(app, job_rx).await
     })?;
 
     Ok(())

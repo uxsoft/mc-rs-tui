@@ -11,7 +11,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use mc_core::VPath;
-use mc_vfs::Vfs;
+use mc_jobs::{CopyJob, DeleteJob, JobUpdateRx, MoveJob};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::time::interval;
@@ -43,7 +43,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(mut app: App) -> Result<()> {
+pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("init terminal")?;
@@ -94,6 +94,18 @@ pub async fn run(mut app: App) -> Result<()> {
                     None => break,
                 }
             }
+            Some(update) = job_rx.recv() => {
+                let mut finished = false;
+                if matches!(update.kind, mc_jobs::JobUpdateKind::Finished(_)) {
+                    finished = true;
+                }
+                app.handle_job_update(update);
+                if finished {
+                    // Reload both panels in case the job changed them.
+                    app.refresh_both().await;
+                }
+                redraw = true;
+            }
             _ = tick.tick() => {}
         }
     }
@@ -130,26 +142,6 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             app.refresh_active().await;
         }
-        PendingOp::Delete { targets } => {
-            for t in targets {
-                let vfs = match app.registry.root_for(&t) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("delete: no backend: {e}");
-                        continue;
-                    }
-                };
-                let res = match stat_kind(vfs.as_ref(), &t).await {
-                    Some(true) => recursive_remove(vfs.as_ref(), &t).await,
-                    Some(false) => vfs.unlink(&t).await,
-                    None => continue,
-                };
-                if let Err(e) = res {
-                    tracing::warn!("delete {} failed: {e}", t);
-                }
-            }
-            app.refresh_active().await;
-        }
         PendingOp::Rename { src, new_name } => {
             let vfs = match app.registry.root_for(&src) {
                 Ok(v) => v,
@@ -171,35 +163,6 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             app.refresh_active().await;
         }
-        PendingOp::Copy { src, dst_dir } => {
-            let src_vfs = match app.registry.root_for(&src) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("copy src: no backend: {e}");
-                    return;
-                }
-            };
-            let dst_vfs = match app.registry.root_for(&dst_dir) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("copy dst: no backend: {e}");
-                    return;
-                }
-            };
-            let name = match src.last().and_then(|l| l.sub.file_name().map(|s| s.to_string_lossy().into_owned())) {
-                Some(n) => n,
-                None => return,
-            };
-            let dst = match build_child(&dst_dir, &name) {
-                Some(t) => t,
-                None => return,
-            };
-            if let Err(e) = stream_copy(src_vfs.as_ref(), &src, dst_vfs.as_ref(), &dst).await {
-                tracing::warn!("copy failed: {e}");
-            }
-            app.refresh_panel(false).await;
-            app.refresh_panel(true).await;
-        }
         PendingOp::Chmod { targets, mode } => {
             for t in targets {
                 let vfs = match app.registry.root_for(&t) {
@@ -215,51 +178,70 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             app.refresh_active().await;
         }
+        PendingOp::SubmitCopy { sources, dst_dir } => {
+            let Some((src_vfs, dst_vfs)) = pick_src_dst(app, sources.first(), &dst_dir) else {
+                return;
+            };
+            let job = CopyJob::new(src_vfs, dst_vfs, sources, dst_dir);
+            let desc = job.description_for_dialog();
+            let handle = app.jobs.submit(Box::new(job));
+            app.show_progress(handle, desc);
+        }
+        PendingOp::SubmitMove { sources, dst_dir } => {
+            let Some((src_vfs, dst_vfs)) = pick_src_dst(app, sources.first(), &dst_dir) else {
+                return;
+            };
+            let job = MoveJob::new(src_vfs, dst_vfs, sources, dst_dir);
+            let desc = job.description_for_dialog();
+            let handle = app.jobs.submit(Box::new(job));
+            app.show_progress(handle, desc);
+        }
+        PendingOp::SubmitDelete { targets } => {
+            let vfs = match targets
+                .first()
+                .and_then(|t| app.registry.root_for(t).ok())
+            {
+                Some(v) => v,
+                None => return,
+            };
+            let job = DeleteJob::new(vfs, targets);
+            let desc = job.description_for_dialog();
+            let handle = app.jobs.submit(Box::new(job));
+            app.show_progress(handle, desc);
+        }
         PendingOp::RunEditor { file, line } => {
             let editor = resolve_editor(app.config.editor.command.as_deref());
-            // Drop terminal so the child sees a clean stdout.
             let _ = terminal.show_cursor();
             if let Err(e) = spawn_editor(&editor, &file, line) {
                 tracing::warn!("editor failed: {e}");
             }
-            // Force a full redraw on return.
             let _ = terminal.clear();
             app.refresh_active().await;
         }
     }
 }
 
-async fn stat_kind(vfs: &dyn Vfs, p: &VPath) -> Option<bool> {
-    match vfs.stat(p).await {
-        Ok(e) => Some(e.is_dir()),
+fn pick_src_dst(
+    app: &App,
+    src_example: Option<&VPath>,
+    dst_dir: &VPath,
+) -> Option<(std::sync::Arc<dyn mc_vfs::Vfs>, std::sync::Arc<dyn mc_vfs::Vfs>)> {
+    let src = src_example?;
+    let src_vfs = match app.registry.root_for(src) {
+        Ok(v) => v,
         Err(e) => {
-            tracing::warn!("stat {p}: {e}");
-            None
+            tracing::warn!("src: no backend: {e}");
+            return None;
         }
-    }
-}
-
-async fn recursive_remove(vfs: &dyn Vfs, p: &VPath) -> mc_core::Result<()> {
-    // Depth-first remove. For Phase 1 this is fine; Phase 2 will move it into a Job.
-    let entries = vfs.read_dir(p).await?;
-    for child in entries {
-        if child.name == "." || child.name == ".." {
-            continue;
+    };
+    let dst_vfs = match app.registry.root_for(dst_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("dst: no backend: {e}");
+            return None;
         }
-        let mut child_path = p.clone();
-        if let Some(layer) = child_path.last().cloned() {
-            let mut new_layer = layer;
-            new_layer.sub.push(&child.name);
-            child_path.pop_layer();
-            child_path.push_layer(new_layer);
-        }
-        if child.is_dir() {
-            Box::pin(recursive_remove(vfs, &child_path)).await?;
-        } else {
-            vfs.unlink(&child_path).await?;
-        }
-    }
-    vfs.rmdir(p).await
+    };
+    Some((src_vfs, dst_vfs))
 }
 
 fn parent_of(p: &VPath) -> Option<VPath> {
@@ -276,38 +258,6 @@ fn parent_of(p: &VPath) -> Option<VPath> {
     Some(new)
 }
 
-async fn stream_copy(
-    src_vfs: &dyn Vfs,
-    src: &VPath,
-    dst_vfs: &dyn Vfs,
-    dst: &VPath,
-) -> mc_core::Result<()> {
-    use mc_vfs::WriteOpts;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let mut reader = src_vfs.open_read(src).await?;
-    let mut writer = dst_vfs
-        .open_write(
-            dst,
-            WriteOpts {
-                create: true,
-                truncate: true,
-                append: false,
-            },
-        )
-        .await?;
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        writer.write_all(&buf[..n]).await?;
-    }
-    writer.flush().await?;
-    Ok(())
-}
-
 fn build_child(parent: &VPath, name: &str) -> Option<VPath> {
     let layer = parent.last().cloned()?;
     let mut new_layer = layer;
@@ -316,4 +266,16 @@ fn build_child(parent: &VPath, name: &str) -> Option<VPath> {
     new.pop_layer();
     new.push_layer(new_layer);
     Some(new)
+}
+
+// -- Convenience: jobs expose `description()` as &str via the trait, but we want
+//    a `String` for the dialog without holding a borrow across the submit.
+trait DescForDialog {
+    fn description_for_dialog(&self) -> String;
+}
+
+impl<T: mc_jobs::Job> DescForDialog for T {
+    fn description_for_dialog(&self) -> String {
+        self.description()
+    }
 }

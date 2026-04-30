@@ -1,14 +1,20 @@
 //! Lightweight modal dialogs (confirm, input).
 
-pub mod input;
 pub mod confirm;
+pub mod hotlist;
+pub mod input;
+pub mod menubar;
+pub mod progress;
 
 use mc_core::key::KeyChord;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
 pub use confirm::ConfirmDialog;
+pub use hotlist::{HotlistAction, HotlistDialog};
 pub use input::InputDialog;
+pub use menubar::{MenuBar, MenuChoice};
+pub use progress::ProgressDialog;
 
 #[derive(Debug)]
 pub enum DialogOutcome<T> {
