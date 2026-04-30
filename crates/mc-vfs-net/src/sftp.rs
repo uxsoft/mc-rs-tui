@@ -8,7 +8,7 @@
 //! `~/.cache/mc-rs/known_hosts` store.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mc_core::{Entry, EntryKind, Error, Result, VPath};
@@ -17,6 +17,8 @@ use russh::client;
 use russh::keys::PublicKey;
 use russh_sftp::client::SftpSession;
 use tokio::io::AsyncRead;
+
+use crate::known_hosts::{CheckResult, KnownHosts};
 
 #[derive(Debug, Clone)]
 pub struct SftpEndpoint {
@@ -67,28 +69,104 @@ pub struct SftpVfs {
     _handle: client::Handle<SshClient>,
 }
 
-struct SshClient;
+struct SshClient {
+    host_port: String,
+    known_hosts: Arc<Mutex<KnownHosts>>,
+}
 
 impl client::Handler for SshClient {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _key: &PublicKey,
+        key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        // TOFU accept. Future: persistent known_hosts store with prompt.
-        Ok(true)
+        let algo = key.algorithm().as_str().to_string();
+        let fp = key.fingerprint(russh::keys::HashAlg::Sha256).to_string();
+        let mut kh = self.known_hosts.lock().expect("known_hosts mutex poisoned");
+        match kh.check(&self.host_port, &algo, &fp) {
+            CheckResult::Match => Ok(true),
+            CheckResult::NewHost => {
+                if let Err(e) = kh.record(&self.host_port, &algo, &fp) {
+                    tracing::warn!("known_hosts write {}: {e}", self.host_port);
+                }
+                tracing::info!("known_hosts: trusting new host {} ({fp})", self.host_port);
+                Ok(true)
+            }
+            CheckResult::Mismatch { recorded } => {
+                tracing::error!(
+                    "known_hosts MISMATCH for {}: server presented {fp}, recorded {recorded}",
+                    self.host_port,
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
 impl SftpVfs {
     /// Connect to `endpoint` and open an SFTP subsystem channel.
+    /// Uses the default known_hosts file at `$XDG_CACHE_HOME/mc-rs/known_hosts`.
     pub async fn connect(scheme: &'static str, endpoint: SftpEndpoint) -> Result<Self> {
+        let known_hosts = KnownHosts::load(KnownHosts::default_path());
+        Self::connect_with_known_hosts(scheme, endpoint, Arc::new(Mutex::new(known_hosts))).await
+    }
+
+    /// Connect using an explicit password (UI-prompt path).
+    pub async fn connect_with_password(
+        scheme: &'static str,
+        endpoint: SftpEndpoint,
+        password: &str,
+    ) -> Result<Self> {
+        let known_hosts = Arc::new(Mutex::new(KnownHosts::load(KnownHosts::default_path())));
+        let host_port = format!("{}:{}", endpoint.host, endpoint.port);
         let cfg = Arc::new(client::Config::default());
-        let mut handle =
-            client::connect(cfg, (endpoint.host.as_str(), endpoint.port), SshClient)
-                .await
-                .map_err(|e| Error::Vfs(format!("ssh connect: {e}")))?;
+        let handler = SshClient {
+            host_port: host_port.clone(),
+            known_hosts,
+        };
+        let mut handle = client::connect(cfg, (endpoint.host.as_str(), endpoint.port), handler)
+            .await
+            .map_err(|e| Error::Vfs(format!("ssh connect: {e}")))?;
+        match handle.authenticate_password(&endpoint.user, password).await {
+            Ok(res) if res.success() => {}
+            Ok(_) => return Err(Error::Vfs(format!("password auth failed for {host_port}"))),
+            Err(e) => return Err(Error::Vfs(format!("password auth error: {e}"))),
+        }
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| Error::Vfs(format!("ssh channel: {e}")))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| Error::Vfs(format!("sftp subsystem: {e}")))?;
+        let session = SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|e| Error::Vfs(format!("sftp init: {e}")))?;
+        Ok(Self {
+            scheme,
+            endpoint,
+            session,
+            _handle: handle,
+        })
+    }
+
+    /// Connect with a caller-provided known_hosts store (useful for tests).
+    pub async fn connect_with_known_hosts(
+        scheme: &'static str,
+        endpoint: SftpEndpoint,
+        known_hosts: Arc<Mutex<KnownHosts>>,
+    ) -> Result<Self> {
+        let host_port = format!("{}:{}", endpoint.host, endpoint.port);
+        let cfg = Arc::new(client::Config::default());
+        let handler = SshClient {
+            host_port,
+            known_hosts,
+        };
+        let mut handle = client::connect(cfg, (endpoint.host.as_str(), endpoint.port), handler)
+            .await
+            .map_err(|e| Error::Vfs(format!("ssh connect: {e}")))?;
 
         if !try_auth(&mut handle, &endpoint.user).await? {
             return Err(Error::Vfs(format!(
@@ -141,7 +219,25 @@ async fn try_auth(handle: &mut client::Handle<SshClient>, user: &str) -> Result<
     if let Ok(true) = try_key_file(handle, user).await {
         return Ok(true);
     }
+    if let Ok(true) = try_password_env(handle, user).await {
+        return Ok(true);
+    }
     Ok(false)
+}
+
+async fn try_password_env(handle: &mut client::Handle<SshClient>, user: &str) -> Result<bool> {
+    let pass = match std::env::var("MC_RS_SFTP_PASS") {
+        Ok(s) if !s.is_empty() => s,
+        _ => return Ok(false),
+    };
+    match handle.authenticate_password(user, pass).await {
+        Ok(res) if res.success() => Ok(true),
+        Ok(_) => Ok(false),
+        Err(e) => {
+            tracing::debug!("ssh password auth: {e}");
+            Ok(false)
+        }
+    }
 }
 
 async fn try_agent(handle: &mut client::Handle<SshClient>, user: &str) -> Result<bool> {

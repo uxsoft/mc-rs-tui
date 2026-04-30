@@ -5,7 +5,10 @@ pub mod find;
 pub mod help;
 pub mod hotlist;
 pub mod input;
+pub mod jobs_view;
+pub mod learn_keys;
 pub mod menubar;
+pub mod password;
 pub mod progress;
 pub mod user_menu;
 
@@ -18,7 +21,10 @@ pub use find::{FindForm, FindFormOutcome, FindParams, FindResults, FindResultsOu
 pub use help::HelpDialog;
 pub use hotlist::{HotlistAction, HotlistDialog};
 pub use input::InputDialog;
+pub use jobs_view::{JobRow, JobsViewDialog};
+pub use learn_keys::LearnKeysDialog;
 pub use menubar::{MenuBar, MenuChoice};
+pub use password::PasswordDialog;
 pub use progress::ProgressDialog;
 pub use user_menu::{UserMenuDialog, UserMenuEntry};
 

@@ -19,5 +19,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 color-eyre = { workspace = true }
 
+[features]
+default = []
+rar = ["mc-tui/rar"]
+
 [lints]
 workspace = true

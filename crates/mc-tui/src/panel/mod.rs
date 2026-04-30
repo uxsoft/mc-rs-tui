@@ -5,7 +5,7 @@ pub mod sort;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use mc_config::FileHighlight;
+use mc_config::{parse_color_name, AnsiColor, FileHighlight, SkinFile};
 use mc_core::action::SortKey;
 use mc_core::{Entry, EntryKind, VPath};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -21,6 +21,7 @@ pub enum ListingMode {
     Full,
     Brief,
     Long,
+    Tree,
 }
 
 impl ListingMode {
@@ -29,9 +30,29 @@ impl ListingMode {
         match self {
             Self::Full => Self::Brief,
             Self::Brief => Self::Long,
-            Self::Long => Self::Full,
+            Self::Long => Self::Tree,
+            Self::Tree => Self::Full,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeNode {
+    pub name: String,
+    pub depth: u16,
+    pub expanded: bool,
+    /// Full VPath of this node.
+    pub path: VPath,
+    /// `true` if this entry is itself a directory (only dirs are listed).
+    pub has_children: bool,
+}
+
+/// Tree-mode state: a flattened, indented view of nested directories.
+/// Built by `App::rebuild_tree` on demand and after each navigation.
+#[derive(Debug, Clone, Default)]
+pub struct TreeState {
+    pub nodes: Vec<TreeNode>,
+    pub cursor: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +67,7 @@ pub struct PanelState {
     pub sort_by: SortKey,
     pub reverse: bool,
     pub mode: ListingMode,
+    pub tree: TreeState,
     /// Set of entry names currently tagged.
     pub marks: HashSet<String>,
     /// Back/forward history of cwds visited from this panel.
@@ -68,6 +90,7 @@ impl PanelState {
             sort_by: SortKey::Name,
             reverse: false,
             mode: ListingMode::Full,
+            tree: TreeState::default(),
             marks: HashSet::new(),
             history_pos: 0,
         }
@@ -167,11 +190,18 @@ pub fn render_panel(
     area: Rect,
     state: &mut PanelState,
     highlight: &FileHighlight,
+    skin: &SkinFile,
 ) {
+    let bg = ansi_to_ratatui(parse_color_name(&skin.panel.background));
+    let border = ansi_to_ratatui(parse_color_name(&skin.panel.border));
+    let active_border = ansi_to_ratatui(parse_color_name(&skin.panel.active_border));
+    let cursor_bg = ansi_to_ratatui(parse_color_name(&skin.panel.cursor_bg));
+    let cursor_fg = ansi_to_ratatui(parse_color_name(&skin.panel.cursor_fg));
+    let marked_fg = ansi_to_ratatui(parse_color_name(&skin.panel.marked_fg));
     let title_style = if state.active {
-        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default().fg(cursor_fg).bg(cursor_bg).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White).bg(Color::Blue)
+        Style::default().fg(Color::White).bg(bg)
     };
     let title = Line::from(vec![
         Span::raw(" "),
@@ -182,11 +212,11 @@ pub fn render_panel(
         .title(title)
         .borders(Borders::ALL)
         .border_style(if state.active {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(active_border)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(border)
         })
-        .style(Style::default().bg(Color::Blue));
+        .style(Style::default().bg(bg));
 
     // Reserve 1 row at bottom for status, body uses the rest.
     let inner = block.inner(area);
@@ -202,33 +232,64 @@ pub fn render_panel(
     // Adjust view_offset so cursor is visible.
     let height = body_area.height as usize;
     if height > 0 {
-        if state.cursor < state.view_offset {
-            state.view_offset = state.cursor;
-        } else if state.cursor >= state.view_offset + height {
-            state.view_offset = state.cursor + 1 - height;
+        let cursor = if matches!(state.mode, ListingMode::Tree) {
+            state.tree.cursor
+        } else {
+            state.cursor
+        };
+        if cursor < state.view_offset {
+            state.view_offset = cursor;
+        } else if cursor >= state.view_offset + height {
+            state.view_offset = cursor + 1 - height;
         }
     }
 
-    let lines = render_entries(state, body_area.width as usize, height, highlight);
-    let para = Paragraph::new(lines).style(Style::default().bg(Color::Blue));
+    let lines = if matches!(state.mode, ListingMode::Tree) {
+        render_tree(state, height, bg, cursor_bg, cursor_fg)
+    } else {
+        render_entries(
+            state,
+            body_area.width as usize,
+            height,
+            highlight,
+            skin,
+            bg,
+            cursor_bg,
+            cursor_fg,
+            marked_fg,
+        )
+    };
+    let para = Paragraph::new(lines).style(Style::default().bg(bg));
     f.render_widget(para, body_area);
 
     // Status line: cursor position + size info.
-    let status = if let Some(e) = state.entries.get(state.cursor) {
+    let status = if matches!(state.mode, ListingMode::Tree) {
+        if let Some(n) = state.tree.nodes.get(state.tree.cursor) {
+            format!("tree: {}", n.path)
+        } else {
+            String::from("(empty tree)")
+        }
+    } else if let Some(e) = state.entries.get(state.cursor) {
         format!("{:>10}  {}", human_size(e.size), e.name)
     } else {
         String::from("(empty)")
     };
     let status_line =
-        Paragraph::new(status).style(Style::default().fg(Color::White).bg(Color::Blue));
+        Paragraph::new(status).style(Style::default().fg(Color::White).bg(bg));
     f.render_widget(status_line, status_area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_entries(
     state: &PanelState,
     width: usize,
     height: usize,
     highlight: &FileHighlight,
+    skin: &SkinFile,
+    bg: Color,
+    cursor_bg: Color,
+    cursor_fg: Color,
+    marked_fg: Color,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(height);
     let end = (state.view_offset + height).min(state.entries.len());
@@ -236,11 +297,24 @@ fn render_entries(
         let e = &state.entries[i];
         let is_cursor = i == state.cursor && state.active;
         let is_marked = state.marks.contains(&e.name);
-        lines.push(format_line(e, state.mode, width, is_cursor, is_marked, highlight));
+        lines.push(format_line(
+            e,
+            state.mode,
+            width,
+            is_cursor,
+            is_marked,
+            highlight,
+            skin,
+            bg,
+            cursor_bg,
+            cursor_fg,
+            marked_fg,
+        ));
     }
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_line(
     e: &Entry,
     mode: ListingMode,
@@ -248,16 +322,21 @@ fn format_line(
     is_cursor: bool,
     is_marked: bool,
     highlight: &FileHighlight,
+    skin: &SkinFile,
+    bg: Color,
+    cursor_bg: Color,
+    cursor_fg: Color,
+    marked_fg: Color,
 ) -> Line<'static> {
-    let mut style = entry_style(e, highlight);
+    let mut style = entry_style(e, highlight, skin, bg);
     if is_marked {
-        style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        style = style.fg(marked_fg).add_modifier(Modifier::BOLD);
     }
     if is_cursor {
-        style = style.bg(Color::Cyan).fg(Color::Black);
+        style = style.bg(cursor_bg).fg(cursor_fg);
     }
     let text = match mode {
-        ListingMode::Brief => e.name.clone(),
+        ListingMode::Brief | ListingMode::Tree => e.name.clone(),
         ListingMode::Full => format!("{:<name$} {:>10}", e.name, human_size(e.size), name = width.saturating_sub(13)),
         ListingMode::Long => {
             let mode_str = unix_mode_str(e);
@@ -274,8 +353,35 @@ fn format_line(
     Line::from(Span::styled(text, style))
 }
 
-fn entry_style(e: &Entry, highlight: &FileHighlight) -> Style {
-    let base = Style::default().fg(Color::White).bg(Color::Blue);
+fn render_tree(
+    state: &PanelState,
+    height: usize,
+    bg: Color,
+    cursor_bg: Color,
+    cursor_fg: Color,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::with_capacity(height);
+    let end = (state.view_offset + height).min(state.tree.nodes.len());
+    for i in state.view_offset..end {
+        let n = &state.tree.nodes[i];
+        let mut style = Style::default().fg(Color::White).bg(bg).add_modifier(Modifier::BOLD);
+        if i == state.tree.cursor && state.active {
+            style = style.bg(cursor_bg).fg(cursor_fg);
+        }
+        let marker = if n.has_children {
+            if n.expanded { "▼" } else { "▶" }
+        } else {
+            " "
+        };
+        let indent: String = " ".repeat(usize::from(n.depth) * 2);
+        let label = format!("{indent}{marker} {}", n.name);
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+    lines
+}
+
+fn entry_style(e: &Entry, highlight: &FileHighlight, skin: &SkinFile, bg: Color) -> Style {
+    let base = Style::default().fg(Color::White).bg(bg);
     match e.kind {
         EntryKind::Dir => base.add_modifier(Modifier::BOLD),
         EntryKind::Symlink => base.fg(Color::Cyan),
@@ -287,18 +393,34 @@ fn entry_style(e: &Entry, highlight: &FileHighlight) -> Style {
                     return base.fg(Color::Green);
                 }
             }
-            // File-highlight by extension group.
-            match highlight.classify(&e.name) {
-                Some("archive") => base.fg(Color::Red),
-                Some("image") => base.fg(Color::Magenta),
-                Some("audio") | Some("video") => base.fg(Color::LightMagenta),
-                Some("doc") => base.fg(Color::White).add_modifier(Modifier::BOLD),
-                Some("source") => base.fg(Color::LightCyan),
-                Some("build") => base.fg(Color::Yellow),
-                _ => base,
+            if let Some(group) = highlight.classify(&e.name) {
+                if let Some(name) = skin.groups.get(group) {
+                    return base.fg(ansi_to_ratatui(parse_color_name(name)));
+                }
             }
+            base
         }
         EntryKind::Other => base,
+    }
+}
+
+fn ansi_to_ratatui(c: AnsiColor) -> Color {
+    match c {
+        AnsiColor::Black => Color::Black,
+        AnsiColor::Red => Color::Red,
+        AnsiColor::Green => Color::Green,
+        AnsiColor::Yellow => Color::Yellow,
+        AnsiColor::Blue => Color::Blue,
+        AnsiColor::Magenta => Color::Magenta,
+        AnsiColor::Cyan => Color::Cyan,
+        AnsiColor::White => Color::White,
+        AnsiColor::DarkGray => Color::DarkGray,
+        AnsiColor::LightRed => Color::LightRed,
+        AnsiColor::LightGreen => Color::LightGreen,
+        AnsiColor::LightYellow => Color::LightYellow,
+        AnsiColor::LightBlue => Color::LightBlue,
+        AnsiColor::LightMagenta => Color::LightMagenta,
+        AnsiColor::LightCyan => Color::LightCyan,
     }
 }
 

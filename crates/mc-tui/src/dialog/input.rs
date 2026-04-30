@@ -12,6 +12,15 @@ pub struct InputDialog {
     prompt: String,
     value: String,
     cursor: usize,
+    /// Snapshot of history at modal-open time (oldest → newest); `history_pos`
+    /// indexes into this. `None` means history is disabled for this modal.
+    history: Option<Vec<String>>,
+    /// `Some(i)` means the value currently shown is `history[i]`. `None` means
+    /// the user is editing fresh text.
+    history_pos: Option<usize>,
+    /// Saved value before the user started Up-arrowing through history; restored
+    /// when they reach the bottom again.
+    saved: Option<String>,
 }
 
 impl InputDialog {
@@ -24,6 +33,54 @@ impl InputDialog {
             prompt: prompt.into(),
             value,
             cursor,
+            history: None,
+            history_pos: None,
+            saved: None,
+        }
+    }
+
+    /// Attach a history snapshot so Up/Down recall past entries.
+    #[must_use]
+    pub fn with_history(mut self, entries: Vec<String>) -> Self {
+        self.history = Some(entries);
+        self
+    }
+
+    fn history_up(&mut self) {
+        let h = match &self.history {
+            Some(h) if !h.is_empty() => h,
+            _ => return,
+        };
+        let new_pos = match self.history_pos {
+            Some(0) => return,
+            Some(p) => p - 1,
+            None => {
+                self.saved = Some(self.value.clone());
+                h.len() - 1
+            }
+        };
+        self.history_pos = Some(new_pos);
+        self.value = h[new_pos].clone();
+        self.cursor = self.value.chars().count();
+    }
+
+    fn history_down(&mut self) {
+        let h = match &self.history {
+            Some(h) if !h.is_empty() => h,
+            _ => return,
+        };
+        match self.history_pos {
+            None => return,
+            Some(p) if p + 1 >= h.len() => {
+                self.history_pos = None;
+                self.value = self.saved.take().unwrap_or_default();
+                self.cursor = self.value.chars().count();
+            }
+            Some(p) => {
+                self.history_pos = Some(p + 1);
+                self.value = h[p + 1].clone();
+                self.cursor = self.value.chars().count();
+            }
         }
     }
 }
@@ -104,6 +161,14 @@ impl Dialog for InputDialog {
             }
             (KeyCode::End, _) => {
                 self.cursor = self.value.chars().count();
+                DialogOutcome::None
+            }
+            (KeyCode::Up, _) => {
+                self.history_up();
+                DialogOutcome::None
+            }
+            (KeyCode::Down, _) => {
+                self.history_down();
                 DialogOutcome::None
             }
             (KeyCode::Char(c), m) if m.is_empty() || m == KeyMods::SHIFT => {

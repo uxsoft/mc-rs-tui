@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mc_config::{
-    AppConfig, CompiledExtBindings, ConfigPaths, ExtAction, ExtBindings, FileHighlight, Hotlist,
+    AppConfig, CompiledExtBindings, ConfigPaths, ExtAction, ExtBindings, FileHighlight, History,
+    Hotlist, Keymap, SkinFile,
 };
 use mc_core::action::SortKey;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
@@ -22,7 +24,15 @@ use crate::dialog::{
     FindResultsOutcome, HotlistAction, HotlistDialog, InputDialog, MenuBar, MenuChoice,
     ProgressDialog,
 };
-use crate::panel::{render_panel, PanelState};
+use crate::panel::{render_panel, ListingMode, PanelState};
+
+#[derive(Debug, Clone)]
+pub struct JobLogEntry {
+    pub id: mc_jobs::JobId,
+    pub description: String,
+    pub status: String,
+    pub finished: Option<mc_jobs::JobOutcome>,
+}
 
 #[derive(Debug, Clone)]
 pub enum PendingOp {
@@ -41,6 +51,15 @@ pub enum PendingOp {
     /// Run a shell command line with terminal suspend/restore. `cwd` is the
     /// directory the command runs in; `cmd` already has `%`-macros expanded.
     RunShell { cwd: PathBuf, cmd: String },
+    /// Suspend the TUI, drop the user into `$SHELL` interactive in `cwd`,
+    /// restore on exit. Phase 13 first cut (no cwd-sync via PROMPT_COMMAND).
+    DropToShell { cwd: PathBuf },
+    /// User submitted a password for a remote-VFS retry.
+    RetryRemoteWithPassword {
+        scheme: String,
+        location: String,
+        password: String,
+    },
 }
 
 #[derive(Debug)]
@@ -50,6 +69,12 @@ pub enum Disposition {
     Quit,
     /// Reload the active panel from its VFS.
     ReloadActive,
+    /// Reload both panels (e.g. after Alt-I sync).
+    ReloadBoth,
+    /// Rebuild the active panel's tree-mode nodes (when entering Tree mode).
+    RebuildTree,
+    /// Toggle expand/collapse of the cursor node in tree mode.
+    TreeToggle,
     /// Execute a side-effecting op via the loop, then reload.
     RunOp(PendingOp),
 }
@@ -75,6 +100,14 @@ enum Modal {
     Diff(crate::diff_widget::DiffWidget),
     Help(crate::dialog::HelpDialog),
     QuickCd(InputDialog),
+    LearnKeys(crate::dialog::LearnKeysDialog),
+    JobsView(crate::dialog::JobsViewDialog),
+    /// Awaiting a password to retry auth for `(scheme, location, user)`.
+    Password {
+        dlg: crate::dialog::PasswordDialog,
+        scheme: String,
+        location: String,
+    },
     Viewer(crate::viewer_widget::ViewerWidget),
     /// Type-ahead filter; `String` is the current filter.
     QuickSearch(String),
@@ -87,10 +120,18 @@ pub struct App {
     pub right: PanelState,
     pub active_left: bool,
     pub jobs: JobQueue,
+    /// Lifecycle log for the background-jobs view (Ctrl-J).
+    pub job_log: std::collections::VecDeque<JobLogEntry>,
     pub highlight: FileHighlight,
     pub hotlist: Hotlist,
     pub paths: ConfigPaths,
     pub extbinds: CompiledExtBindings,
+    pub keymap: Keymap,
+    pub skin: SkinFile,
+    pub cmd_history: History,
+    /// Transient status: (text, deadline). Shown in place of buttonbar until
+    /// `deadline` is reached.
+    status_msg: Option<(String, Instant)>,
     modal: Modal,
 }
 
@@ -110,6 +151,15 @@ impl App {
                 ExtBindings::defaults()
             });
         let extbinds = CompiledExtBindings::from_config(&ext_cfg);
+        let keymap = Keymap::load(&paths.keymap()).unwrap_or_else(|e| {
+            tracing::warn!("keymap: load failed: {e}");
+            Keymap::default()
+        });
+        let skin = SkinFile::load(&paths.skin()).unwrap_or_else(|e| {
+            tracing::warn!("skin: load failed: {e}");
+            SkinFile::default()
+        });
+        let cmd_history = History::load(paths.config_dir.join("cmd_history"), 100);
         let app = Self {
             config,
             registry,
@@ -117,10 +167,15 @@ impl App {
             right,
             active_left: true,
             jobs,
+            job_log: std::collections::VecDeque::with_capacity(64),
             highlight: FileHighlight::defaults(),
             hotlist,
             paths,
             extbinds,
+            keymap,
+            skin,
+            cmd_history,
+            status_msg: None,
             modal: Modal::None,
         };
         (app, rx)
@@ -173,6 +228,41 @@ impl App {
     }
 
     pub fn handle_job_update(&mut self, update: mc_jobs::JobUpdate) {
+        // Update / append the job-log row.
+        let row = self
+            .job_log
+            .iter_mut()
+            .find(|r| r.id == update.id);
+        match (&update.kind, row) {
+            (mc_jobs::JobUpdateKind::Started { description }, None) => {
+                if self.job_log.len() >= 64 {
+                    self.job_log.pop_front();
+                }
+                self.job_log.push_back(JobLogEntry {
+                    id: update.id,
+                    description: description.clone(),
+                    status: "started".into(),
+                    finished: None,
+                });
+            }
+            (mc_jobs::JobUpdateKind::Started { description }, Some(r)) => {
+                r.description = description.clone();
+            }
+            (mc_jobs::JobUpdateKind::Progress(_), Some(_)) => {}
+            (mc_jobs::JobUpdateKind::Status(s), Some(r)) => {
+                r.status = s.clone();
+            }
+            (mc_jobs::JobUpdateKind::Finished(o), Some(r)) => {
+                r.finished = Some(o.clone());
+                r.status = match o {
+                    mc_jobs::JobOutcome::Success => "done".into(),
+                    mc_jobs::JobOutcome::Cancelled => "cancelled".into(),
+                    mc_jobs::JobOutcome::Failed(e) => format!("failed: {e}"),
+                };
+            }
+            _ => {}
+        }
+
         if let Modal::Progress(dlg) = &mut self.modal {
             if dlg.handle.id != update.id {
                 return;
@@ -217,42 +307,235 @@ impl App {
     /// not yet registered, connect and register it. Any auth / connection
     /// failure logs a warning and is treated as if no backend exists (panel
     /// will simply show empty).
-    pub async fn ensure_remote_mount(&mut self) {
-        // Look for the deepest layer whose backend is missing.
-        let panels = if self.active_left {
-            [&self.left, &self.right]
-        } else {
-            [&self.right, &self.left]
+    /// Open a password modal for `(scheme, location)` if no other modal is
+    /// currently displayed; the user then submits and the loop fires
+    /// `RetryRemoteWithPassword` to retry the connection.
+    pub fn prompt_password(&mut self, scheme: String, location: String) {
+        if !matches!(self.modal, Modal::None) {
+            return;
+        }
+        let prompt = format!("password for {scheme}://{location}:");
+        self.modal = Modal::Password {
+            dlg: crate::dialog::PasswordDialog::new(" Authenticate ", prompt),
+            scheme,
+            location,
         };
-        for panel in panels {
+    }
+
+    pub async fn ensure_remote_mount(&mut self) {
+        // Snapshot every (scheme, location, sample-vpath) triple that needs a
+        // backend; mutate registry/modal afterwards (no borrows during await).
+        let mut needed: Vec<(String, String, VPath)> = Vec::new();
+        for panel in [&self.left, &self.right] {
             for layer in panel.cwd.layers() {
-                if layer.scheme != "sftp" {
-                    continue;
+                if matches!(layer.scheme.as_str(), "sftp" | "ftp" | "dav") {
+                    needed.push((
+                        layer.scheme.clone(),
+                        layer.location.clone(),
+                        panel.cwd.clone(),
+                    ));
                 }
-                // Check both per-pair and per-scheme registries.
-                if self.registry.root_for(&panel.cwd).is_ok() {
-                    continue;
+            }
+        }
+        for (scheme, location, sample) in needed {
+            if self.registry.root_for(&sample).is_ok() {
+                continue;
+            }
+            match scheme.as_str() {
+                "sftp" => {
+                    let endpoint = match mc_vfs_net::sftp::SftpEndpoint::parse(&location) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!("sftp endpoint parse: {e}");
+                            continue;
+                        }
+                    };
+                    match mc_vfs_net::SftpVfs::connect("sftp", endpoint).await {
+                        Ok(vfs) => {
+                            self.registry.register_mount(
+                                "sftp",
+                                location.clone(),
+                                std::sync::Arc::new(vfs),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("sftp connect {location}: {e}");
+                            self.prompt_password("sftp".into(), location);
+                            return;
+                        }
+                    }
                 }
-                let endpoint = match mc_vfs_net::sftp::SftpEndpoint::parse(&layer.location) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("sftp endpoint parse: {e}");
-                        continue;
+                "ftp" => {
+                    let endpoint = match mc_vfs_net::ftp::FtpEndpoint::parse(&location) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!("ftp endpoint parse: {e}");
+                            continue;
+                        }
+                    };
+                    match mc_vfs_net::FtpVfs::connect("ftp", endpoint).await {
+                        Ok(vfs) => {
+                            self.registry.register_mount(
+                                "ftp",
+                                location.clone(),
+                                std::sync::Arc::new(vfs),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("ftp connect {location}: {e}");
+                            self.prompt_password("ftp".into(), location);
+                            return;
+                        }
                     }
-                };
-                match mc_vfs_net::SftpVfs::connect("sftp", endpoint).await {
-                    Ok(vfs) => {
-                        self.registry.register_mount(
-                            "sftp",
-                            layer.location.clone(),
-                            std::sync::Arc::new(vfs),
-                        );
+                }
+                "dav" => {
+                    let endpoint = match mc_vfs_net::dav::DavEndpoint::parse(&location) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!("dav endpoint parse: {e}");
+                            continue;
+                        }
+                    };
+                    match mc_vfs_net::DavVfs::open("dav", endpoint) {
+                        Ok(vfs) => {
+                            self.registry.register_mount(
+                                "dav",
+                                location.clone(),
+                                std::sync::Arc::new(vfs),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("dav open {location}: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("sftp connect {}: {e}", layer.location);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Forward a bracketed-paste payload to the focused text-input modal, if
+    /// any. Multiline pastes are flattened to single lines (newlines → spaces).
+    pub fn handle_paste(&mut self, text: String) {
+        let text = text.replace(['\r', '\n'], " ");
+        if text.is_empty() {
+            return;
+        }
+        // The cleanest way to get characters into our modals' InputDialog is
+        // to synthesize Char chords. This is uniform across CmdLine/Mkdir/
+        // Rename/SelectGroup/Chmod/QuickCd/FindForm/QuickSearch.
+        for c in text.chars() {
+            if c == '\t' {
+                continue;
+            }
+            let chord = mc_core::key::KeyChord {
+                code: mc_core::key::KeyCode::Char(c),
+                mods: mc_core::key::KeyMods::empty(),
+            };
+            // Only route if a modal is active; otherwise pastes are dropped on
+            // the floor (panel mode doesn't have a text-input target).
+            if matches!(self.modal, Modal::None) {
+                return;
+            }
+            let _ = self.handle_modal_key(chord);
+        }
+    }
+
+    /// Show a transient status message for ~3 seconds (overlays the buttonbar).
+    pub fn set_status(&mut self, text: impl Into<String>) {
+        self.status_msg = Some((text.into(), Instant::now() + Duration::from_secs(3)));
+    }
+
+    fn current_status(&self) -> Option<&str> {
+        match &self.status_msg {
+            Some((s, deadline)) if Instant::now() < *deadline => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Build (or rebuild) tree-mode nodes for the active panel: cwd plus its
+    /// immediate subdirs at depth 1. Subsequent expansions go through
+    /// [`tree_toggle`].
+    pub async fn rebuild_tree(&mut self) {
+        let cwd = self.active_ref().cwd.clone();
+        let vfs = match self.registry.root_for(&cwd) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let mut nodes = Vec::new();
+        nodes.push(crate::panel::TreeNode {
+            name: cwd
+                .last()
+                .map(|l| l.sub.display().to_string())
+                .unwrap_or_else(|| ".".into()),
+            depth: 0,
+            expanded: true,
+            path: cwd.clone(),
+            has_children: true,
+        });
+        if let Ok(entries) = vfs.read_dir(&cwd).await {
+            let mut dirs: Vec<&mc_core::Entry> = entries.iter().filter(|e| e.is_dir() && e.name != "..").collect();
+            dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            for d in dirs {
+                if let Some(child) = child_path(&cwd, &d.name) {
+                    nodes.push(crate::panel::TreeNode {
+                        name: d.name.clone(),
+                        depth: 1,
+                        expanded: false,
+                        path: child,
+                        has_children: true,
+                    });
+                }
+            }
+        }
+        let panel = if self.active_left { &mut self.left } else { &mut self.right };
+        panel.tree.nodes = nodes;
+        panel.tree.cursor = 0;
+    }
+
+    /// Toggle expansion of the tree-cursor node.
+    pub async fn tree_toggle(&mut self) {
+        let (cursor, depth, path, expanded) = {
+            let p = self.active_ref();
+            match p.tree.nodes.get(p.tree.cursor) {
+                Some(n) if n.has_children => (p.tree.cursor, n.depth, n.path.clone(), n.expanded),
+                _ => return,
+            }
+        };
+        if expanded {
+            let panel = if self.active_left { &mut self.left } else { &mut self.right };
+            let mut end = cursor + 1;
+            while end < panel.tree.nodes.len() && panel.tree.nodes[end].depth > depth {
+                end += 1;
+            }
+            panel.tree.nodes.drain((cursor + 1)..end);
+            panel.tree.nodes[cursor].expanded = false;
+        } else {
+            let vfs = match self.registry.root_for(&path) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut children: Vec<crate::panel::TreeNode> = Vec::new();
+            if let Ok(entries) = vfs.read_dir(&path).await {
+                let mut dirs: Vec<&mc_core::Entry> = entries.iter().filter(|e| e.is_dir() && e.name != "..").collect();
+                dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                for d in dirs {
+                    if let Some(c) = child_path(&path, &d.name) {
+                        children.push(crate::panel::TreeNode {
+                            name: d.name.clone(),
+                            depth: depth + 1,
+                            expanded: false,
+                            path: c,
+                            has_children: true,
+                        });
                     }
                 }
             }
+            let panel = if self.active_left { &mut self.left } else { &mut self.right };
+            for (i, c) in children.into_iter().enumerate() {
+                panel.tree.nodes.insert(cursor + 1 + i, c);
+            }
+            panel.tree.nodes[cursor].expanded = true;
         }
     }
 
@@ -283,6 +566,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, chord: KeyChord) -> Disposition {
+        // Apply user remap before dispatch. Modal text-input dialogs receive
+        // the remapped chord too so users can rebind e.g. C-d → F8 globally.
+        let chord = self.keymap.translate(chord);
         // If a modal is active, route the key there first.
         if !matches!(self.modal, Modal::None) {
             return self.handle_modal_key(chord);
@@ -362,6 +648,7 @@ impl App {
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
                 DialogOutcome::Submitted(raw) => {
+                    self.cmd_history.push(raw.clone());
                     let ctx = self.macro_ctx();
                     let cmd = mc_core::substitute(&raw, &ctx);
                     let cwd = self
@@ -497,6 +784,34 @@ impl App {
                 }
                 DialogOutcome::Cancelled | DialogOutcome::Submitted(()) => Disposition::Redraw,
             },
+            Modal::LearnKeys(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::LearnKeys(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled | DialogOutcome::Submitted(()) => Disposition::Redraw,
+            },
+            Modal::JobsView(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::JobsView(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled | DialogOutcome::Submitted(()) => Disposition::Redraw,
+            },
+            Modal::Password { mut dlg, scheme, location } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Password { dlg, scheme, location };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(pw) => {
+                    Disposition::RunOp(PendingOp::RetryRemoteWithPassword {
+                        scheme,
+                        location,
+                        password: pw,
+                    })
+                }
+            },
             Modal::QuickCd(mut dlg) => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
                     self.modal = Modal::QuickCd(dlg);
@@ -574,6 +889,10 @@ impl App {
             | mc_vfs_archive::ArchiveKind::TarXz
             | mc_vfs_archive::ArchiveKind::TarZst => "tar",
             mc_vfs_archive::ArchiveKind::Zip => "zip",
+            mc_vfs_archive::ArchiveKind::Cpio => "cpio",
+            mc_vfs_archive::ArchiveKind::SevenZ => "7z",
+            #[cfg(feature = "rar")]
+            mc_vfs_archive::ArchiveKind::Rar => "rar",
         };
         let mount_id = next_mount_id();
         let location = format!("mount-{mount_id}");
@@ -740,9 +1059,39 @@ impl App {
         self.handle_panel_key(chord)
     }
 
+    fn compare_dirs(&mut self) {
+        // Build maps from name → size for both panels (skipping ".." and dirs).
+        let other = if self.active_left { &self.right } else { &self.left };
+        let other_by_name: std::collections::HashMap<String, u64> = other
+            .entries
+            .iter()
+            .filter(|e| e.name != ".." && !e.is_dir())
+            .map(|e| (e.name.clone(), e.size))
+            .collect();
+        let active = if self.active_left { &mut self.left } else { &mut self.right };
+        active.marks.clear();
+        for e in &active.entries {
+            if e.name == ".." || e.is_dir() {
+                continue;
+            }
+            match other_by_name.get(&e.name) {
+                Some(sz) if *sz == e.size => {} // identical
+                _ => {
+                    active.marks.insert(e.name.clone());
+                }
+            }
+        }
+    }
+
     fn handle_ctrl_x(&mut self, chord: KeyChord) -> Disposition {
         // mc Ctrl-X chords; we only implement a few here (more in Phase 11).
         match (chord.code, chord.mods) {
+            (KeyCode::Char('='), m) if m.is_empty() => {
+                self.compare_dirs();
+                let n = if self.active_left { self.left.marks.len() } else { self.right.marks.len() };
+                self.set_status(format!("Compare dirs: {n} files differ"));
+                Disposition::Redraw
+            }
             (KeyCode::Char('c'), m) | (KeyCode::Char('C'), m)
                 if m.is_empty() || m == KeyMods::SHIFT =>
             {
@@ -781,7 +1130,10 @@ impl App {
                     .last()
                     .map(|l| l.sub.display().to_string())
                     .unwrap_or_default();
-                let _ = crate::clipboard::copy(&cwd);
+                match crate::clipboard::copy(&cwd) {
+                    Some(via) => self.set_status(format!("Copied cwd to {via}")),
+                    None => self.set_status("Clipboard unavailable"),
+                }
                 Disposition::Redraw
             }
             (KeyCode::Char('t'), m) | (KeyCode::Char('T'), m)
@@ -801,7 +1153,10 @@ impl App {
                         full.push_str(&e.name);
                     }
                 }
-                let _ = crate::clipboard::copy(&full);
+                match crate::clipboard::copy(&full) {
+                    Some(via) => self.set_status(format!("Copied path to {via}")),
+                    None => self.set_status("Clipboard unavailable"),
+                }
                 Disposition::Redraw
             }
             _ => Disposition::Redraw,
@@ -864,7 +1219,56 @@ impl App {
         out
     }
 
+    fn handle_tree_panel_key(&mut self, chord: KeyChord) -> Disposition {
+        match (chord.code, chord.mods) {
+            (KeyCode::F(10), m) if m.is_empty() => Disposition::Quit,
+            (KeyCode::Char('q'), m) if m == KeyMods::CTRL => Disposition::Quit,
+            (KeyCode::Tab, _) => {
+                self.active_left = !self.active_left;
+                self.left.active = self.active_left;
+                self.right.active = !self.active_left;
+                Disposition::Redraw
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                let p = self.active();
+                p.tree.cursor = p.tree.cursor.saturating_sub(1);
+                Disposition::Redraw
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                let p = self.active();
+                if p.tree.cursor + 1 < p.tree.nodes.len() {
+                    p.tree.cursor += 1;
+                }
+                Disposition::Redraw
+            }
+            (KeyCode::Home, _) => {
+                self.active().tree.cursor = 0;
+                Disposition::Redraw
+            }
+            (KeyCode::End, _) => {
+                let p = self.active();
+                p.tree.cursor = p.tree.nodes.len().saturating_sub(1);
+                Disposition::Redraw
+            }
+            (KeyCode::Enter, _) | (KeyCode::Char(' '), _) => Disposition::TreeToggle,
+            // Switch back to Full listing.
+            (KeyCode::Char('t'), m) if m == KeyMods::ALT => {
+                self.active().mode = ListingMode::Full;
+                Disposition::Redraw
+            }
+            (KeyCode::F(1), m) if m.is_empty() => {
+                self.modal = Modal::Help(crate::dialog::HelpDialog::new());
+                Disposition::Redraw
+            }
+            _ => Disposition::None,
+        }
+    }
+
     fn handle_panel_key(&mut self, chord: KeyChord) -> Disposition {
+        // Tree-mode panel handles a smaller set of chords distinctly.
+        if matches!(self.active_ref().mode, ListingMode::Tree) {
+            return self.handle_tree_panel_key(chord);
+        }
         match (chord.code, chord.mods) {
             (KeyCode::F(10), m) if m.is_empty() => Disposition::Quit,
             (KeyCode::Char('q'), m) if m == KeyMods::CTRL => Disposition::Quit,
@@ -967,10 +1371,15 @@ impl App {
                 Disposition::ReloadActive
             }
 
-            // Listing-mode cycle (mc Alt-T).
+            // Listing-mode cycle (mc Alt-T). When transitioning into Tree we
+            // need an async rebuild — emit RebuildTree so the loop runs it.
             (KeyCode::Char('t'), m) if m == KeyMods::ALT => {
                 self.active().mode = self.active().mode.next();
-                Disposition::Redraw
+                if matches!(self.active().mode, ListingMode::Tree) {
+                    Disposition::RebuildTree
+                } else {
+                    Disposition::Redraw
+                }
             }
 
             // Sort: Alt-S cycles key, Ctrl-R reverses.
@@ -1023,11 +1432,44 @@ impl App {
                 Disposition::Redraw
             }
 
+            // Ctrl-K — Learn keys
+            (KeyCode::Char('k'), m) if m == KeyMods::CTRL => {
+                self.modal = Modal::LearnKeys(crate::dialog::LearnKeysDialog::new());
+                Disposition::Redraw
+            }
+
+            // Ctrl-J — Background jobs view
+            (KeyCode::Char('j'), m) if m == KeyMods::CTRL => {
+                let rows: Vec<crate::dialog::JobRow> = self
+                    .job_log
+                    .iter()
+                    .map(|r| crate::dialog::JobRow {
+                        id_str: format!("{}", r.id.0),
+                        description: r.description.clone(),
+                        status: r.status.clone(),
+                        finished: r.finished.is_some(),
+                    })
+                    .collect();
+                self.modal = Modal::JobsView(crate::dialog::JobsViewDialog::new(rows));
+                Disposition::Redraw
+            }
+
+            // Ctrl-O — drop to a shell in the active panel's cwd
+            (KeyCode::Char('o'), m) if m == KeyMods::CTRL => {
+                let cwd = self
+                    .active_ref()
+                    .cwd
+                    .last()
+                    .map(|l| l.sub.clone())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                Disposition::RunOp(PendingOp::DropToShell { cwd })
+            }
+
             // Alt-C — Quick cd (typed path; supports local + sftp:// URLs)
             (KeyCode::Char('c'), m) if m == KeyMods::ALT => {
                 self.modal = Modal::QuickCd(InputDialog::new(
                     " Quick cd ",
-                    "Path or URL (e.g. /tmp, sftp://user@host/srv):",
+                    "Path or URL (e.g. /tmp, sftp://user@host/srv, ftp://anon@host/pub):",
                     String::new(),
                 ));
                 Disposition::Redraw
@@ -1041,8 +1483,43 @@ impl App {
 
             // ":" — open the command line
             (KeyCode::Char(':'), m) if m.is_empty() || m == KeyMods::SHIFT => {
-                self.modal = Modal::CmdLine(InputDialog::new(" Command ", "$", String::new()));
+                let entries: Vec<String> = self.cmd_history.entries().iter().cloned().collect();
+                self.modal = Modal::CmdLine(
+                    InputDialog::new(" Command ", "$", String::new()).with_history(entries),
+                );
                 Disposition::Redraw
+            }
+
+            // Alt-I — mirror active panel cwd to the other panel.
+            (KeyCode::Char('i'), m) if m == KeyMods::ALT => {
+                let cwd = self.active_ref().cwd.clone();
+                if self.active_left {
+                    self.right.navigate(cwd);
+                } else {
+                    self.left.navigate(cwd);
+                }
+                Disposition::ReloadBoth
+            }
+            // Alt-O — load active panel's parent (or selected dir) to the other panel.
+            (KeyCode::Char('o'), m) if m == KeyMods::ALT => {
+                let target = {
+                    let active = self.active_ref();
+                    let entry = active.entries.get(active.cursor).cloned();
+                    match entry {
+                        Some(e) if matches!(e.kind, EntryKind::Dir) && e.name != ".." => {
+                            active.cursor_path()
+                        }
+                        _ => parent_path(&active.cwd).or_else(|| Some(active.cwd.clone())),
+                    }
+                };
+                if let Some(t) = target {
+                    if self.active_left {
+                        self.right.navigate(t);
+                    } else {
+                        self.left.navigate(t);
+                    }
+                }
+                Disposition::ReloadActive
             }
 
             // History
@@ -1212,9 +1689,19 @@ impl App {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[0]);
 
-        render_panel(f, panels[0], &mut self.left, &self.highlight);
-        render_panel(f, panels[1], &mut self.right, &self.highlight);
-        render_buttonbar(f, chunks[1]);
+        render_panel(f, panels[0], &mut self.left, &self.highlight, &self.skin);
+        render_panel(f, panels[1], &mut self.right, &self.highlight, &self.skin);
+        if let Some(status) = self.current_status() {
+            let p = Paragraph::new(Line::from(format!(" {status} "))).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            );
+            f.render_widget(p, chunks[1]);
+        } else {
+            render_buttonbar(f, chunks[1]);
+        }
 
         match &mut self.modal {
             Modal::None | Modal::PrefixCtrlX => {}
@@ -1232,6 +1719,9 @@ impl App {
             Modal::Diff(d) => d.render(f, area),
             Modal::Help(d) => d.render(f, area),
             Modal::QuickCd(d) => d.render(f, area),
+            Modal::LearnKeys(d) => d.render(f, area),
+            Modal::JobsView(d) => d.render(f, area),
+            Modal::Password { dlg, .. } => dlg.render(f, area),
             Modal::QuickSearch(filter) => render_quick_search(f, area, filter),
         }
         if matches!(self.modal, Modal::PrefixCtrlX) {

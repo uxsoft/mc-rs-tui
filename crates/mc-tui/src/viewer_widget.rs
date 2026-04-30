@@ -31,7 +31,20 @@ pub struct ViewerWidget {
     /// Active search state: pattern + last index in `text_lines`. `None` =
     /// no search; `Some` with empty pattern = prompt is open and user is typing.
     search: Option<SearchState>,
+    encoding: &'static encoding_rs::Encoding,
 }
+
+const ENCODINGS: &[&encoding_rs::Encoding] = &[
+    encoding_rs::UTF_8,
+    encoding_rs::WINDOWS_1252,
+    encoding_rs::ISO_8859_2,
+    encoding_rs::WINDOWS_1250,
+    encoding_rs::WINDOWS_1251,
+    encoding_rs::SHIFT_JIS,
+    encoding_rs::UTF_16LE,
+    encoding_rs::UTF_16BE,
+    encoding_rs::GBK,
+];
 
 #[derive(Debug, Clone, Default)]
 struct SearchState {
@@ -54,8 +67,8 @@ impl ViewerWidget {
         f.read_exact(&mut bytes)?;
         let truncated = total_size > MAX_BYTES;
 
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        let text_lines = text.split_inclusive('\n').map(|l| l.trim_end_matches('\n').to_string()).collect();
+        let encoding = encoding_rs::UTF_8;
+        let text_lines = decode_lines(&bytes, encoding);
 
         let title = path.file_name().map_or_else(
             || path.display().to_string(),
@@ -70,7 +83,22 @@ impl ViewerWidget {
             offset: 0,
             truncated,
             search: None,
+            encoding,
         })
+    }
+
+    fn cycle_encoding(&mut self) {
+        let cur = self
+            .encoding
+            .name()
+            .to_string();
+        let idx = ENCODINGS
+            .iter()
+            .position(|e| e.name() == cur)
+            .unwrap_or(0);
+        let next = (idx + 1) % ENCODINGS.len();
+        self.encoding = ENCODINGS[next];
+        self.text_lines = decode_lines(&self.bytes, self.encoding);
     }
 
     /// Returns `true` if still open, `false` to close.
@@ -127,6 +155,9 @@ impl ViewerWidget {
             KeyCode::Char('N') => {
                 self.find_from(self.offset.saturating_sub(1), false);
             }
+            KeyCode::Char('e') if chord.mods == mc_core::key::KeyMods::ALT => {
+                self.cycle_encoding();
+            }
             _ => {}
         }
         true
@@ -161,7 +192,8 @@ impl ViewerWidget {
             ViewerMode::Hex => "HEX ",
         };
         let trunc = if self.truncated { " (truncated)" } else { "" };
-        let title = format!(" View [{mode_label}] {}{} ", self.title, trunc);
+        let enc = self.encoding.name();
+        let title = format!(" View [{mode_label} {enc}] {}{} ", self.title, trunc);
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -250,4 +282,11 @@ impl ViewerWidget {
         }
         out
     }
+}
+
+fn decode_lines(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> Vec<String> {
+    let (cow, _enc, _had_errors) = encoding.decode(bytes);
+    cow.split_inclusive('\n')
+        .map(|l| l.trim_end_matches('\n').to_string())
+        .collect()
 }

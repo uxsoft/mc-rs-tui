@@ -41,11 +41,18 @@ fn main() -> Result<()> {
         .build()
         .context("tokio runtime")?;
 
-    runtime.block_on(async move {
+    let print_cwd = args.print_cwd.clone();
+    let exit_info = runtime.block_on(async move {
         let config = AppConfig::default();
         let (app, job_rx) = App::new(config, start);
         mc_tui::run(app, job_rx).await
     })?;
+
+    if let (Some(file), Some(cwd)) = (print_cwd, exit_info.final_cwd) {
+        if let Err(e) = std::fs::write(&file, format!("{}\n", cwd.display())) {
+            tracing::warn!("write {}: {e}", file.display());
+        }
+    }
 
     Ok(())
 }

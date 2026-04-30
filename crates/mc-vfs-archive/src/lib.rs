@@ -1,5 +1,9 @@
 //! Read-only archive backends mounted as virtual filesystems.
 
+pub mod cpio_vfs;
+#[cfg(feature = "rar")]
+pub mod rar_vfs;
+pub mod sevenz_vfs;
 pub mod tar_vfs;
 pub mod zip_vfs;
 
@@ -8,6 +12,10 @@ use std::sync::Arc;
 
 use mc_vfs::Vfs;
 
+pub use cpio_vfs::CpioVfs;
+#[cfg(feature = "rar")]
+pub use rar_vfs::RarVfs;
+pub use sevenz_vfs::SevenZVfs;
 pub use tar_vfs::TarVfs;
 pub use zip_vfs::ZipVfs;
 
@@ -21,6 +29,10 @@ pub enum ArchiveKind {
     TarXz,
     TarZst,
     Zip,
+    Cpio,
+    SevenZ,
+    #[cfg(feature = "rar")]
+    Rar,
 }
 
 impl ArchiveKind {
@@ -40,6 +52,15 @@ impl ArchiveKind {
             Some(Self::Tar)
         } else if name.ends_with(".zip") {
             Some(Self::Zip)
+        } else if name.ends_with(".cpio") {
+            Some(Self::Cpio)
+        } else if name.ends_with(".7z") {
+            Some(Self::SevenZ)
+        } else if name.ends_with(".rar") {
+            #[cfg(feature = "rar")]
+            { Some(Self::Rar) }
+            #[cfg(not(feature = "rar"))]
+            { None }
         } else {
             None
         }
@@ -56,6 +77,10 @@ pub fn mount_local(path: &Path, kind: ArchiveKind, scheme: &'static str) -> mc_c
         ArchiveKind::TarXz => Ok(Arc::new(TarVfs::open_compressed(path, scheme, Compression::Xz)?)),
         ArchiveKind::TarZst => Ok(Arc::new(TarVfs::open_compressed(path, scheme, Compression::Zst)?)),
         ArchiveKind::Zip => Ok(Arc::new(ZipVfs::open(path, scheme)?)),
+        ArchiveKind::Cpio => Ok(Arc::new(CpioVfs::open(path, scheme)?)),
+        ArchiveKind::SevenZ => Ok(Arc::new(SevenZVfs::open(path, scheme)?)),
+        #[cfg(feature = "rar")]
+        ArchiveKind::Rar => Ok(Arc::new(RarVfs::open(path, scheme)?)),
     }
 }
 

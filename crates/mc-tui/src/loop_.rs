@@ -53,7 +53,14 @@ struct FindStream {
     cancel: CancellationToken,
 }
 
-pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
+/// Outcome of a TUI session; the binary may serialize it (`-P FILE`).
+#[derive(Debug, Default)]
+pub struct ExitInfo {
+    /// Final cwd of the active panel, if it points at a local path.
+    pub final_cwd: Option<std::path::PathBuf>,
+}
+
+pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("init terminal")?;
@@ -93,6 +100,21 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
                                     rearm_watcher(&app, &mut watcher, &watch_tx);
                                     redraw = true;
                                 }
+                                Disposition::ReloadBoth => {
+                                    app.ensure_remote_mount().await;
+                                    app.refresh_both().await;
+                                    update_title(&app);
+                                    rearm_watcher(&app, &mut watcher, &watch_tx);
+                                    redraw = true;
+                                }
+                                Disposition::RebuildTree => {
+                                    app.rebuild_tree().await;
+                                    redraw = true;
+                                }
+                                Disposition::TreeToggle => {
+                                    app.tree_toggle().await;
+                                    redraw = true;
+                                }
                                 Disposition::RunOp(op) => {
                                     run_op(&mut app, &mut terminal, op, &mut find).await;
                                     update_title(&app);
@@ -104,6 +126,10 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
                         }
                     }
                     Some(Ok(Event::Resize(_, _))) => redraw = true,
+                    Some(Ok(Event::Paste(text))) => {
+                        app.handle_paste(text);
+                        redraw = true;
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
                         tracing::warn!("input stream error: {e}");
@@ -145,7 +171,17 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<()> {
         }
     }
 
-    Ok(())
+    let final_cwd = {
+        let cwd = if app.active_left { &app.left.cwd } else { &app.right.cwd };
+        cwd.last().and_then(|l| {
+            if l.scheme == "local" {
+                Some(l.sub.clone())
+            } else {
+                None
+            }
+        })
+    };
+    Ok(ExitInfo { final_cwd })
 }
 
 fn rearm_watcher(
@@ -372,6 +408,61 @@ async fn run_op<B: ratatui::backend::Backend>(
             let cancel = CancellationToken::new();
             let rx = mc_find::run(vfs, q, cancel.clone());
             *find = Some(FindStream { rx, cancel });
+        }
+        PendingOp::RetryRemoteWithPassword { scheme, location, password } => {
+            match scheme.as_str() {
+                "sftp" => {
+                    if let Ok(endpoint) = mc_vfs_net::sftp::SftpEndpoint::parse(&location) {
+                        match mc_vfs_net::SftpVfs::connect_with_password("sftp", endpoint, &password)
+                            .await
+                        {
+                            Ok(vfs) => {
+                                app.registry.register_mount("sftp", location.clone(), std::sync::Arc::new(vfs));
+                                app.set_status(format!("connected to sftp://{location}"));
+                                app.refresh_active().await;
+                            }
+                            Err(e) => {
+                                tracing::warn!("sftp password retry {location}: {e}");
+                                app.set_status(format!("auth failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                "ftp" => {
+                    if let Ok(endpoint) = mc_vfs_net::ftp::FtpEndpoint::parse(&location) {
+                        match mc_vfs_net::FtpVfs::connect_with_password("ftp", endpoint, &password).await {
+                            Ok(vfs) => {
+                                app.registry.register_mount("ftp", location.clone(), std::sync::Arc::new(vfs));
+                                app.set_status(format!("connected to ftp://{location}"));
+                                app.refresh_active().await;
+                            }
+                            Err(e) => {
+                                tracing::warn!("ftp password retry {location}: {e}");
+                                app.set_status(format!("auth failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        PendingOp::DropToShell { cwd } => {
+            let _ = terminal.show_cursor();
+            match crate::subshell::drop_to_shell_with_sync(&cwd) {
+                Ok(Some(new_cwd)) => {
+                    let target = mc_core::VPath::local(new_cwd.clone());
+                    if app.active_left {
+                        app.left.navigate(target);
+                    } else {
+                        app.right.navigate(target);
+                    }
+                    app.set_status(format!("subshell synced cwd to {}", new_cwd.display()));
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("subshell: {e}"),
+            }
+            let _ = terminal.clear();
+            app.refresh_both().await;
         }
         PendingOp::RunShell { cwd, cmd } => {
             let _ = terminal.show_cursor();

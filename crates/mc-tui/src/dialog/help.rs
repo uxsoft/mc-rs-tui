@@ -115,6 +115,15 @@ fn build_help_lines() -> Vec<Line<'static>> {
         "mc-rs-tui — Rust + Ratatui port of GNU Midnight Commander".to_string(),
         bold,
     )));
+    out.push(Line::from(""));
+    out.push(Line::from(
+        "Customize bindings: ~/.config/mc-rs/keymap.toml (e.g. [[remap]] from=\"C-d\" to=\"F8\")"
+            .to_string(),
+    ));
+    out.push(Line::from(
+        "Customize colors:   ~/.config/mc-rs/skin.toml ([panel] background, [groups] archive=...)"
+            .to_string(),
+    ));
 
     section(&mut out, "Function keys");
     row(&mut out, "F1", "this help");
@@ -138,6 +147,8 @@ fn build_help_lines() -> Vec<Line<'static>> {
     row(&mut out, "+", "select group (glob, e.g. *.txt)");
     row(&mut out, "\\", "unselect group");
     row(&mut out, "Alt-Y / Alt-U", "directory history back / forward");
+    row(&mut out, "Alt-I", "mirror cwd into other panel");
+    row(&mut out, "Alt-O", "load other panel with selected/parent dir");
     row(&mut out, "Ctrl-./Alt-.", "toggle hidden files");
 
     section(&mut out, "Sort & listing");
@@ -150,17 +161,22 @@ fn build_help_lines() -> Vec<Line<'static>> {
     row(&mut out, "Alt-?", "find file (filename + content)");
     row(&mut out, "Alt-C", "quick cd (typed path or sftp://… URL)");
     row(&mut out, "Ctrl-\\", "hotlist");
-    row(&mut out, ":", "shell command line");
+    row(&mut out, ":", "shell command line (Up/Dn: history)");
     row(&mut out, "Ctrl-X C", "chmod (octal)");
     row(&mut out, "Ctrl-X H", "add cwd to hotlist");
     row(&mut out, "Ctrl-X D", "diff cursor file vs other panel");
+    row(&mut out, "Ctrl-X =", "compare directories (mark differing files)");
     row(&mut out, "Ctrl-X P", "copy active cwd to clipboard");
     row(&mut out, "Ctrl-X T", "copy cursor path to clipboard");
+    row(&mut out, "Ctrl-K", "learn keys (terminal calibration)");
+    row(&mut out, "Ctrl-J", "background jobs view");
+    row(&mut out, "Ctrl-O", "drop to shell ($SHELL); exit/Ctrl-D returns");
 
     section(&mut out, "Inside viewer (F3)");
     row(&mut out, "F4", "toggle text / hex mode");
     row(&mut out, "/", "search forward");
     row(&mut out, "n / N", "next / prev match");
+    row(&mut out, "Alt-E", "cycle text encoding");
     row(&mut out, "j/k or arrows", "scroll");
     row(&mut out, "Esc / F10 / q", "close");
 
