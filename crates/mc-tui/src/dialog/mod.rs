@@ -6,11 +6,14 @@ pub mod help;
 pub mod hotlist;
 pub mod input;
 pub mod jobs_view;
+pub mod layout;
 pub mod learn_keys;
 pub mod menubar;
+pub mod options;
 pub mod password;
 pub mod progress;
 pub mod user_menu;
+pub mod vfs_list;
 
 use mc_config::ColorScheme;
 use mc_core::key::KeyChord;
@@ -23,11 +26,14 @@ pub use help::HelpDialog;
 pub use hotlist::{HotlistAction, HotlistDialog};
 pub use input::InputDialog;
 pub use jobs_view::{JobRow, JobsViewDialog};
+pub use layout::LayoutDialog;
 pub use learn_keys::LearnKeysDialog;
-pub use menubar::{MenuBar, MenuChoice};
+pub use menubar::{MenuBar, MenuChoice, MenuDialog};
+pub use options::{OptionField, OptionKey, OptionsDialog};
 pub use password::PasswordDialog;
 pub use progress::ProgressDialog;
 pub use user_menu::{UserMenuDialog, UserMenuEntry};
+pub use vfs_list::{VfsListAction, VfsListDialog};
 
 #[derive(Debug)]
 pub enum DialogOutcome<T> {

@@ -12,7 +12,7 @@ use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use mc_core::{Entry, EntryKind, VPath};
 use mc_jobs::{JobQueue, JobUpdateRx};
 use mc_vfs::{Registry, Vfs};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -23,7 +23,7 @@ use crate::theme::rtc;
 
 use crate::dialog::{
     ConfirmDialog, Dialog, DialogOutcome, FindForm, FindFormOutcome, FindParams, FindResults,
-    FindResultsOutcome, HotlistAction, HotlistDialog, InputDialog, MenuBar, MenuChoice,
+    FindResultsOutcome, HotlistAction, HotlistDialog, InputDialog, MenuBar, MenuChoice, MenuDialog,
     ProgressDialog,
 };
 use crate::panel::{render_panel, ListingMode, PanelState};
@@ -62,6 +62,29 @@ pub enum PendingOp {
         location: String,
         password: String,
     },
+    /// Change owner / group on each target. `uid` / `gid` may be `None`
+    /// to leave that side unchanged.
+    Chown {
+        targets: Vec<VPath>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    },
+    /// Create a hard link.
+    Hardlink { src: PathBuf, link: PathBuf },
+    /// Create a symbolic link. If `relative`, `target` is rewritten
+    /// relative to `link`'s parent before calling `symlink`.
+    Symlink {
+        target: PathBuf,
+        link: PathBuf,
+        relative: bool,
+    },
+    /// Replace `link`'s target with `new_target`.
+    EditSymlink { link: PathBuf, new_target: PathBuf },
+    /// Recursively compute size of each subdirectory of `cwd`. Local only.
+    ComputeSizes { cwd: VPath },
+    /// Run `cmd` via `sh -c`, parse stdout as one path per line, and
+    /// populate the active panel with those entries.
+    ExternalPanelize { cwd: PathBuf, cmd: String },
 }
 
 #[derive(Debug)]
@@ -94,7 +117,10 @@ enum Modal {
     /// A long-running job is in flight (or just finished).
     Progress(ProgressDialog),
     Hotlist(HotlistDialog),
-    Menu(MenuBar),
+    /// Menubar has keyboard focus; the dropdown is open. Menubar state lives
+    /// on `App::menubar` so the title row can be drawn even when this is
+    /// inactive.
+    Menu,
     FindForm(FindForm),
     FindResults(FindResults),
     CmdLine(InputDialog),
@@ -113,6 +139,19 @@ enum Modal {
     Viewer(crate::viewer_widget::ViewerWidget),
     /// Type-ahead filter; `String` is the current filter.
     QuickSearch(String),
+    Chown { dlg: InputDialog, targets: Vec<VPath> },
+    Chattr { dlg: InputDialog, targets: Vec<VPath> },
+    Hardlink { dlg: InputDialog, src: VPath },
+    Symlink { dlg: InputDialog, src: VPath, relative: bool },
+    EditSymlink { dlg: InputDialog, link: PathBuf },
+    Filter(InputDialog),
+    VfsList(crate::dialog::VfsListDialog),
+    ExternalPanelize(InputDialog),
+    Configuration(crate::dialog::OptionsDialog),
+    Layout(crate::dialog::LayoutDialog),
+    Confirmation(crate::dialog::OptionsDialog),
+    VirtualFs(crate::dialog::OptionsDialog),
+    QuitConfirm(ConfirmDialog),
 }
 
 pub struct App {
@@ -135,6 +174,7 @@ pub struct App {
     /// Transient status: (text, deadline). Shown in place of buttonbar until
     /// `deadline` is reached.
     status_msg: Option<(String, Instant)>,
+    pub menubar: MenuBar,
     modal: Modal,
 }
 
@@ -143,8 +183,20 @@ impl App {
         let registry = Registry::with_defaults();
         let cwd = VPath::local(start);
         let mut left = PanelState::new(cwd.clone());
-        let right = PanelState::new(cwd);
+        let mut right = PanelState::new(cwd);
         left.active = true;
+        // Apply panel defaults from config.
+        for p in [&mut left, &mut right] {
+            p.show_hidden = config.panels.show_hidden;
+            p.mix_dirs = config.panels.mix_dirs;
+        }
+        // Restore last-saved per-panel snapshots if present.
+        if let Some(s) = &config.panel_left {
+            apply_panel_snapshot(&mut left, s);
+        }
+        if let Some(s) = &config.panel_right {
+            apply_panel_snapshot(&mut right, s);
+        }
         let (jobs, rx) = JobQueue::new(256);
         let paths = ConfigPaths::discover();
         let hotlist = Hotlist::load(&paths.config_dir.join("hotlist.toml")).unwrap_or_default();
@@ -184,6 +236,7 @@ impl App {
             scheme,
             cmd_history,
             status_msg: None,
+            menubar: MenuBar::new(),
             modal: Modal::None,
         };
         (app, rx)
@@ -223,6 +276,17 @@ impl App {
     pub fn find_finish(&mut self) {
         if let Modal::FindResults(r) = &mut self.modal {
             r.finish();
+        }
+    }
+
+    /// Snapshot of the items currently held by the active FindResults modal.
+    /// Empty when no Find is active or the modal is something else.
+    #[must_use]
+    pub fn find_results_items(&self) -> Vec<VPath> {
+        if let Modal::FindResults(r) = &self.modal {
+            r.items.clone()
+        } else {
+            Vec::new()
         }
     }
 
@@ -549,6 +613,12 @@ impl App {
 
     pub async fn refresh_panel(&mut self, left: bool) {
         let panel = if left { &mut self.left } else { &mut self.right };
+        // Skip the read_dir for virtually-panelized panels — they hold a
+        // synthetic entry list (Find-and-panelize / External panelize) that
+        // we don't want to overwrite until the user navigates away.
+        if panel.is_virtual_panelized {
+            return;
+        }
         match self.registry.root_for(&panel.cwd) {
             Ok(vfs) => match read_dir_with_parent(vfs.as_ref(), &panel.cwd).await {
                 Ok(entries) => {
@@ -712,10 +782,14 @@ impl App {
                     self.active().navigate(target);
                     Disposition::ReloadActive
                 }
+                DialogOutcome::Submitted(FindResultsOutcome::Panelize(items)) => {
+                    self.panelize_active(items);
+                    Disposition::Redraw
+                }
             },
-            Modal::Menu(mut dlg) => match dlg.handle_key(chord) {
+            Modal::Menu => match self.menubar.handle_key(chord) {
                 DialogOutcome::None => {
-                    self.modal = Modal::Menu(dlg);
+                    self.modal = Modal::Menu;
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
@@ -861,6 +935,215 @@ impl App {
                         Disposition::Redraw
                     }
                 }
+            },
+            Modal::Chown { mut dlg, targets } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Chown { dlg, targets };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(s) => match parse_chown(&s) {
+                    Some((uid, gid)) => {
+                        Disposition::RunOp(PendingOp::Chown { targets, uid, gid })
+                    }
+                    None => {
+                        self.set_status(format!("chown: cannot resolve {s:?}"));
+                        Disposition::Redraw
+                    }
+                },
+            },
+            Modal::Chattr { mut dlg, targets } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Chattr { dlg, targets };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(attrs) => {
+                    let mut quoted = String::new();
+                    for t in &targets {
+                        if let Some(local) = vpath_to_local(t) {
+                            if !quoted.is_empty() {
+                                quoted.push(' ');
+                            }
+                            quoted.push('\'');
+                            quoted.push_str(&local.to_string_lossy().replace('\'', "'\\''"));
+                            quoted.push('\'');
+                        }
+                    }
+                    if quoted.is_empty() {
+                        self.set_status("chattr: local files only");
+                        return Disposition::Redraw;
+                    }
+                    let cwd = self
+                        .active_ref()
+                        .cwd
+                        .last()
+                        .map(|l| l.sub.clone())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let cmd = format!("chattr {} -- {}", attrs, quoted);
+                    Disposition::RunOp(PendingOp::RunShell { cwd, cmd })
+                }
+            },
+            Modal::Hardlink { mut dlg, src } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Hardlink { dlg, src };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(link_str) => {
+                    let Some(src_local) = vpath_to_local(&src) else {
+                        self.set_status("hardlink: local files only");
+                        return Disposition::Redraw;
+                    };
+                    Disposition::RunOp(PendingOp::Hardlink {
+                        src: src_local,
+                        link: PathBuf::from(link_str),
+                    })
+                }
+            },
+            Modal::Symlink { mut dlg, src, relative } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Symlink { dlg, src, relative };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(link_str) => {
+                    let Some(src_local) = vpath_to_local(&src) else {
+                        self.set_status("symlink: local files only");
+                        return Disposition::Redraw;
+                    };
+                    Disposition::RunOp(PendingOp::Symlink {
+                        target: src_local,
+                        link: PathBuf::from(link_str),
+                        relative,
+                    })
+                }
+            },
+            Modal::EditSymlink { mut dlg, link } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::EditSymlink { dlg, link };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(new_target) => {
+                    Disposition::RunOp(PendingOp::EditSymlink {
+                        link,
+                        new_target: PathBuf::from(new_target),
+                    })
+                }
+            },
+            Modal::Filter(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Filter(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(s) => {
+                    let s = s.trim().to_string();
+                    self.active().filter = if s.is_empty() { None } else { Some(s) };
+                    Disposition::ReloadActive
+                }
+            },
+            Modal::VfsList(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::VfsList(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(crate::dialog::VfsListAction::Free {
+                    scheme,
+                    location,
+                }) => {
+                    self.registry.unregister_mount(&scheme, &location);
+                    let mounts = self.registry.mounts();
+                    self.modal = Modal::VfsList(crate::dialog::VfsListDialog::new(mounts));
+                    Disposition::Redraw
+                }
+                DialogOutcome::Submitted(crate::dialog::VfsListAction::Goto {
+                    scheme,
+                    location,
+                }) => {
+                    let url = format!("{scheme}://{location}");
+                    if let Ok(p) = url.parse::<VPath>() {
+                        self.active().navigate(p);
+                        Disposition::ReloadActive
+                    } else {
+                        self.set_status(format!("cannot parse {url:?}"));
+                        Disposition::Redraw
+                    }
+                }
+            },
+            Modal::ExternalPanelize(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::ExternalPanelize(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(cmd) => {
+                    let cwd = self
+                        .active_ref()
+                        .cwd
+                        .last()
+                        .map(|l| l.sub.clone())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    Disposition::RunOp(PendingOp::ExternalPanelize { cwd, cmd })
+                }
+            },
+            Modal::Configuration(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Configuration(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(()) => {
+                    dlg.apply(&mut self.config);
+                    self.left.show_hidden = self.config.panels.show_hidden;
+                    self.right.show_hidden = self.config.panels.show_hidden;
+                    self.left.mix_dirs = self.config.panels.mix_dirs;
+                    self.right.mix_dirs = self.config.panels.mix_dirs;
+                    Disposition::ReloadBoth
+                }
+            },
+            Modal::Layout(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Layout(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(layout) => {
+                    self.config.layout = layout;
+                    Disposition::Redraw
+                }
+            },
+            Modal::Confirmation(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Confirmation(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(()) => {
+                    dlg.apply(&mut self.config);
+                    Disposition::Redraw
+                }
+            },
+            Modal::VirtualFs(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::VirtualFs(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(()) => {
+                    dlg.apply(&mut self.config);
+                    Disposition::Redraw
+                }
+            },
+            Modal::QuitConfirm(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::QuitConfirm(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled | DialogOutcome::Submitted(false) => Disposition::Redraw,
+                DialogOutcome::Submitted(true) => Disposition::Quit,
             },
             Modal::QuickSearch(mut filter) => match (chord.code, chord.mods) {
                 (KeyCode::Escape, _) | (KeyCode::Enter, _) => Disposition::Redraw,
@@ -1026,45 +1309,309 @@ impl App {
     }
 
     fn handle_menu_choice(&mut self, c: MenuChoice) -> Disposition {
-        // Translate the menu pick into the equivalent panel-mode key chord.
-        let chord = match c {
-            MenuChoice::View => KeyChord::plain(KeyCode::F(3)),
-            MenuChoice::Edit => KeyChord::plain(KeyCode::F(4)),
-            MenuChoice::Copy => KeyChord::plain(KeyCode::F(5)),
-            MenuChoice::Move => KeyChord::plain(KeyCode::F(6)),
-            MenuChoice::Mkdir => KeyChord::plain(KeyCode::F(7)),
-            MenuChoice::Delete => KeyChord::plain(KeyCode::F(8)),
-            MenuChoice::Quit => return Disposition::Quit,
-            MenuChoice::Hotlist => KeyChord::new(KeyCode::Char('\\'), KeyMods::CTRL),
-            MenuChoice::ToggleHidden => KeyChord::new(KeyCode::Char('.'), KeyMods::CTRL),
-            MenuChoice::SortCycle => KeyChord::new(KeyCode::Char('s'), KeyMods::ALT),
-            MenuChoice::ToggleListingMode => KeyChord::new(KeyCode::Char('t'), KeyMods::ALT),
-            MenuChoice::Find => {
-                self.modal = Modal::FindForm(FindForm::new(FindParams::default()));
-                return Disposition::Redraw;
+        match c {
+            MenuChoice::Quit => self.maybe_confirm_quit(),
+            MenuChoice::KeyChord(chord) => self.handle_panel_key(chord),
+            MenuChoice::CtrlX(ch) => self.handle_ctrl_x(KeyChord::plain(KeyCode::Char(ch))),
+            MenuChoice::Reread => Disposition::ReloadActive,
+            MenuChoice::SwapPanels => {
+                std::mem::swap(&mut self.left, &mut self.right);
+                self.left.active = self.active_left;
+                self.right.active = !self.active_left;
+                Disposition::Redraw
             }
-            MenuChoice::Chmod => {
+            MenuChoice::FocusThen { left, then } => {
+                self.active_left = left;
+                self.left.active = left;
+                self.right.active = !left;
+                self.handle_menu_choice(*then)
+            }
+            MenuChoice::Status(msg) => {
+                self.set_status(msg);
+                Disposition::Redraw
+            }
+            MenuChoice::OpenDialog(d) => self.open_menu_dialog(d),
+        }
+    }
+
+    /// Open a custom dialog for a menu item that doesn't map to a key chord.
+    /// Each arm constructs the appropriate `Modal::*` variant; the dispatcher
+    /// in `handle_modal_key` then drives the dialog and runs the resulting
+    /// `PendingOp`.
+    fn open_menu_dialog(&mut self, d: MenuDialog) -> Disposition {
+        match d {
+            MenuDialog::Chown => {
                 let targets = self.selected_targets();
                 if targets.is_empty() {
                     return Disposition::Redraw;
                 }
-                self.modal = Modal::Chmod {
-                    dlg: InputDialog::new(" Chmod ", "Octal mode (e.g. 755):", "644"),
+                self.modal = Modal::Chown {
+                    dlg: InputDialog::new(
+                        " Chown ",
+                        "user:group (e.g. me:me, or 1000:1000):",
+                        String::new(),
+                    ),
                     targets,
                 };
-                return Disposition::Redraw;
+                Disposition::Redraw
             }
-            MenuChoice::AddToHotlist => {
-                let p = self.active_ref().cwd.to_string();
-                let label = p
-                    .rsplit_once(['/', '\\'])
-                    .map_or(p.clone(), |(_, n)| n.to_string());
-                self.hotlist.add(label, p);
-                self.save_hotlist();
-                return Disposition::Redraw;
+            MenuDialog::Chattr => {
+                let targets = self.selected_targets();
+                if targets.is_empty() {
+                    return Disposition::Redraw;
+                }
+                self.modal = Modal::Chattr {
+                    dlg: InputDialog::new(" Chattr ", "Attrs (e.g. +i, -i, +a):", "+i"),
+                    targets,
+                };
+                Disposition::Redraw
             }
+            MenuDialog::Hardlink => {
+                let Some(src) = self
+                    .active_ref()
+                    .cursor_path()
+                    .filter(|_| {
+                        self.active_ref()
+                            .entries
+                            .get(self.active_ref().cursor)
+                            .map(|e| e.name != "..")
+                            .unwrap_or(false)
+                    })
+                else {
+                    return Disposition::Redraw;
+                };
+                let default_link = default_link_name(&src);
+                self.modal = Modal::Hardlink {
+                    dlg: InputDialog::new(" Hardlink ", "Link path:", default_link),
+                    src,
+                };
+                Disposition::Redraw
+            }
+            MenuDialog::Symlink { relative } => {
+                let Some(src) = self
+                    .active_ref()
+                    .cursor_path()
+                    .filter(|_| {
+                        self.active_ref()
+                            .entries
+                            .get(self.active_ref().cursor)
+                            .map(|e| e.name != "..")
+                            .unwrap_or(false)
+                    })
+                else {
+                    return Disposition::Redraw;
+                };
+                let default_link = default_link_name(&src);
+                let title = if relative { " Relative symlink " } else { " Symbolic link " };
+                self.modal = Modal::Symlink {
+                    dlg: InputDialog::new(title, "Link path:", default_link),
+                    src,
+                    relative,
+                };
+                Disposition::Redraw
+            }
+            MenuDialog::EditSymlink => {
+                let Some(target) = self.active_ref().cursor_path() else {
+                    return Disposition::Redraw;
+                };
+                let local = match vpath_to_local(&target) {
+                    Some(p) => p,
+                    None => {
+                        self.set_status("edit symlink: local files only");
+                        return Disposition::Redraw;
+                    }
+                };
+                let current = match std::fs::read_link(&local) {
+                    Ok(t) => t.to_string_lossy().into_owned(),
+                    Err(_) => {
+                        self.set_status("edit symlink: not a symlink");
+                        return Disposition::Redraw;
+                    }
+                };
+                self.modal = Modal::EditSymlink {
+                    dlg: InputDialog::new(" Edit symlink ", "Symlink target:", current),
+                    link: local,
+                };
+                Disposition::Redraw
+            }
+            MenuDialog::Filter => {
+                let current = self.active_ref().filter.clone().unwrap_or_default();
+                self.modal = Modal::Filter(InputDialog::new(
+                    " Filter ",
+                    "Glob (empty to clear):",
+                    current,
+                ));
+                Disposition::Redraw
+            }
+            MenuDialog::FtpLink => {
+                self.modal = Modal::QuickCd(InputDialog::new(
+                    " FTP link ",
+                    "URL (ftp://user@host/path):",
+                    "ftp://".to_string(),
+                ));
+                Disposition::Redraw
+            }
+            MenuDialog::SftpLink => {
+                self.modal = Modal::QuickCd(InputDialog::new(
+                    " SFTP link ",
+                    "URL (sftp://user@host/path):",
+                    "sftp://".to_string(),
+                ));
+                Disposition::Redraw
+            }
+            MenuDialog::ShellLink => {
+                self.set_status("shell link (sh://) not supported by this build");
+                Disposition::Redraw
+            }
+            MenuDialog::ActiveVfsList => {
+                let mounts = self.registry.mounts();
+                if mounts.is_empty() {
+                    self.set_status("no active VFS mounts");
+                    return Disposition::Redraw;
+                }
+                self.modal =
+                    Modal::VfsList(crate::dialog::VfsListDialog::new(mounts));
+                Disposition::Redraw
+            }
+            MenuDialog::ExternalPanelize => {
+                self.modal = Modal::ExternalPanelize(InputDialog::new(
+                    " External panelize ",
+                    "Shell command (one path per line on stdout):",
+                    String::new(),
+                ));
+                Disposition::Redraw
+            }
+            MenuDialog::ShowDirSizes => {
+                let cwd = self.active_ref().cwd.clone();
+                Disposition::RunOp(PendingOp::ComputeSizes { cwd })
+            }
+            MenuDialog::EditMenuFile => self.edit_config_file(self.paths.user_menu()),
+            MenuDialog::EditExtensionFile => self.edit_config_file(self.paths.extbind()),
+            MenuDialog::EditHighlightingFile => {
+                self.edit_config_file(self.paths.filehighlight())
+            }
+            MenuDialog::Configuration => {
+                self.modal = Modal::Configuration(crate::dialog::OptionsDialog::configuration(
+                    &self.config,
+                ));
+                Disposition::Redraw
+            }
+            MenuDialog::Layout => {
+                self.modal = Modal::Layout(crate::dialog::LayoutDialog::new(self.config.layout));
+                Disposition::Redraw
+            }
+            MenuDialog::Confirmation => {
+                self.modal = Modal::Confirmation(crate::dialog::OptionsDialog::confirmation(
+                    &self.config,
+                ));
+                Disposition::Redraw
+            }
+            MenuDialog::VirtualFs => {
+                self.modal = Modal::VirtualFs(crate::dialog::OptionsDialog::vfs(&self.config));
+                Disposition::Redraw
+            }
+            MenuDialog::SaveSetup => {
+                self.snapshot_panels_into_config();
+                let path = self.paths.main_config();
+                match self.config.save(&path) {
+                    Ok(()) => self.set_status(format!("setup saved to {}", path.display())),
+                    Err(e) => self.set_status(format!("save setup: {e}")),
+                }
+                Disposition::Redraw
+            }
+            MenuDialog::FindAndPanelize => {
+                let mut params = FindParams::default();
+                params.panelize = true;
+                self.modal = Modal::FindForm(FindForm::new(params));
+                Disposition::Redraw
+            }
+            MenuDialog::Encoding => {
+                self.set_status("encoding: UTF-8 throughout (no conversion needed)");
+                Disposition::Redraw
+            }
+            MenuDialog::DisplayBits => {
+                self.set_status("display bits: UTF-8 only");
+                Disposition::Redraw
+            }
+        }
+    }
+
+    fn edit_config_file(&mut self, path: PathBuf) -> Disposition {
+        // Ensure the file exists so $EDITOR doesn't get an empty target.
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, "# created by mc-rs\n");
+        }
+        Disposition::RunOp(PendingOp::RunEditor { file: path, line: None })
+    }
+
+    /// Replace the active panel's entries with synthetic rows for `items`,
+    /// flagging the panel as virtually panelized (next reload skipped). Used
+    /// by Find-and-panelize and External panelize.
+    pub fn panelize_active(&mut self, items: Vec<VPath>) {
+        let mut entries: Vec<Entry> = Vec::with_capacity(items.len());
+        for vp in &items {
+            let local = vpath_to_local(vp);
+            let (size, kind) = match local.as_ref().and_then(|p| std::fs::symlink_metadata(p).ok())
+            {
+                Some(md) => {
+                    let k = if md.is_dir() {
+                        EntryKind::Dir
+                    } else if md.file_type().is_symlink() {
+                        EntryKind::Symlink
+                    } else {
+                        EntryKind::File
+                    };
+                    (md.len(), k)
+                }
+                None => (0, EntryKind::File),
+            };
+            entries.push(Entry {
+                name: vp.to_string(),
+                kind,
+                size,
+                mtime: None,
+                atime: None,
+                ctime: None,
+                mode: None,
+                uid: None,
+                gid: None,
+                nlink: None,
+                target: None,
+            });
+        }
+        let panel = if self.active_left {
+            &mut self.left
+        } else {
+            &mut self.right
         };
-        self.handle_panel_key(chord)
+        panel.entries = entries;
+        panel.cursor = 0;
+        panel.view_offset = 0;
+        panel.is_virtual_panelized = true;
+        self.modal = Modal::None;
+        self.set_status(format!("panelized {} items", items.len()));
+    }
+
+    /// Either return `Disposition::Quit` directly or open a confirmation
+    /// modal, depending on `config.options.confirm_exit`.
+    fn maybe_confirm_quit(&mut self) -> Disposition {
+        if self.config.options.confirm_exit {
+            self.modal = Modal::QuitConfirm(ConfirmDialog::new(
+                " Quit ",
+                "Quit Midnight Commander?",
+            ));
+            Disposition::Redraw
+        } else {
+            Disposition::Quit
+        }
+    }
+
+    fn snapshot_panels_into_config(&mut self) {
+        self.config.panel_left = Some(panel_snapshot(&self.left));
+        self.config.panel_right = Some(panel_snapshot(&self.right));
     }
 
     fn compare_dirs(&mut self) {
@@ -1229,8 +1776,8 @@ impl App {
 
     fn handle_tree_panel_key(&mut self, chord: KeyChord) -> Disposition {
         match (chord.code, chord.mods) {
-            (KeyCode::F(10), m) if m.is_empty() => Disposition::Quit,
-            (KeyCode::Char('q'), m) if m == KeyMods::CTRL => Disposition::Quit,
+            (KeyCode::F(10), m) if m.is_empty() => self.maybe_confirm_quit(),
+            (KeyCode::Char('q'), m) if m == KeyMods::CTRL => self.maybe_confirm_quit(),
             (KeyCode::Tab, _) => {
                 self.active_left = !self.active_left;
                 self.left.active = self.active_left;
@@ -1278,8 +1825,8 @@ impl App {
             return self.handle_tree_panel_key(chord);
         }
         match (chord.code, chord.mods) {
-            (KeyCode::F(10), m) if m.is_empty() => Disposition::Quit,
-            (KeyCode::Char('q'), m) if m == KeyMods::CTRL => Disposition::Quit,
+            (KeyCode::F(10), m) if m.is_empty() => self.maybe_confirm_quit(),
+            (KeyCode::Char('q'), m) if m == KeyMods::CTRL => self.maybe_confirm_quit(),
             (KeyCode::Tab, _) => {
                 self.active_left = !self.active_left;
                 self.left.active = self.active_left;
@@ -1424,7 +1971,8 @@ impl App {
 
             // F9 — menu bar
             (KeyCode::F(9), m) if m.is_empty() => {
-                self.modal = Modal::Menu(MenuBar::new());
+                self.menubar.reset();
+                self.modal = Modal::Menu;
                 Disposition::Redraw
             }
 
@@ -1689,13 +2237,31 @@ impl App {
         let area = f.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
             .split(area);
 
+        // Always render the menubar title row at the top.
+        let menu_focused = matches!(self.modal, Modal::Menu);
+        self.menubar
+            .render_titles(f, chunks[0], &self.scheme, menu_focused);
+
+        let left_pct = self.config.layout.left_pct.clamp(1, 99);
+        let panels_dir = if self.config.layout.vertical {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        };
         let panels = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(chunks[0]);
+            .direction(panels_dir)
+            .constraints([
+                Constraint::Percentage(left_pct as u16),
+                Constraint::Percentage((100 - left_pct as u16).max(1)),
+            ])
+            .split(chunks[1]);
 
         render_panel(f, panels[0], &mut self.left, &self.highlight, &self.scheme);
         render_panel(f, panels[1], &mut self.right, &self.highlight, &self.scheme);
@@ -1706,21 +2272,20 @@ impl App {
                     .bg(rtc(self.scheme.op_status_bg))
                     .add_modifier(ratatui::style::Modifier::BOLD),
             );
-            f.render_widget(p, chunks[1]);
+            f.render_widget(p, chunks[2]);
         } else {
-            render_buttonbar(f, chunks[1], &self.scheme);
+            render_buttonbar(f, chunks[2], &self.scheme);
         }
 
         let scheme = &self.scheme;
         match &mut self.modal {
-            Modal::None | Modal::PrefixCtrlX => {}
+            Modal::None | Modal::PrefixCtrlX | Modal::Menu => {}
             Modal::Mkdir(d) | Modal::Rename(d, _) => d.render(f, area, scheme),
             Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => dlg.render(f, area, scheme),
             Modal::DeleteConfirm(d, _) => d.render(f, area, scheme),
             Modal::Viewer(v) => v.render(f, area, scheme),
             Modal::Progress(d) => d.render(f, area, scheme),
             Modal::Hotlist(d) => d.render(f, area, scheme),
-            Modal::Menu(d) => d.render(f, area, scheme),
             Modal::FindForm(d) => d.render(f, area, scheme),
             Modal::FindResults(d) => d.render(f, area, scheme),
             Modal::CmdLine(d) => d.render(f, area, scheme),
@@ -1732,6 +2297,24 @@ impl App {
             Modal::JobsView(d) => d.render(f, area, scheme),
             Modal::Password { dlg, .. } => dlg.render(f, area, scheme),
             Modal::QuickSearch(filter) => render_quick_search(f, area, filter, scheme),
+            Modal::Chown { dlg, .. }
+            | Modal::Chattr { dlg, .. }
+            | Modal::Hardlink { dlg, .. }
+            | Modal::Symlink { dlg, .. }
+            | Modal::EditSymlink { dlg, .. }
+            | Modal::ExternalPanelize(dlg)
+            | Modal::Filter(dlg) => dlg.render(f, area, scheme),
+            Modal::VfsList(d) => d.render(f, area, scheme),
+            Modal::Configuration(d) | Modal::Confirmation(d) | Modal::VirtualFs(d) => {
+                d.render(f, area, scheme)
+            }
+            Modal::Layout(d) => d.render(f, area, scheme),
+            Modal::QuitConfirm(d) => d.render(f, area, scheme),
+        }
+        if menu_focused {
+            // Dropdown overlays the body area, anchored just under row 0.
+            let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+            self.menubar.render_dropdown(f, body, scheme);
         }
         if matches!(self.modal, Modal::PrefixCtrlX) {
             let hint = Line::from(" C-x: c=chmod   (Esc to cancel) ");
@@ -1792,37 +2375,115 @@ fn parse_octal_mode(s: &str) -> Option<u32> {
     u32::from_str_radix(s.trim(), 8).ok().filter(|&m| m <= 0o7777)
 }
 
-/// Tiny glob: `*` matches any chars, `?` matches one char, case-insensitive.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().flat_map(char::to_lowercase).collect();
-    let t: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
-    glob_inner(&p, &t)
+/// Parse a `user:group` chown spec. Either side may be empty (returns `None`
+/// for that field, meaning "don't change"). Numeric (uid/gid) and name forms
+/// are both accepted on Unix; non-Unix only accepts numeric.
+pub fn parse_chown(s: &str) -> Option<(Option<u32>, Option<u32>)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (user, group) = match s.split_once(':') {
+        Some((u, g)) => (u, g),
+        None => (s, ""),
+    };
+    let uid = resolve_user(user.trim())?;
+    let gid = resolve_group(group.trim())?;
+    Some((uid, gid))
 }
 
-fn glob_inner(p: &[char], t: &[char]) -> bool {
-    let (mut pi, mut ti) = (0usize, 0usize);
-    let (mut star_p, mut star_t): (Option<usize>, usize) = (None, 0);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star_p = Some(pi);
-            star_t = ti;
-            pi += 1;
-        } else if let Some(sp) = star_p {
-            pi = sp + 1;
-            star_t += 1;
-            ti = star_t;
-        } else {
-            return false;
-        }
+#[cfg(unix)]
+fn resolve_user(x: &str) -> Option<Option<u32>> {
+    if x.is_empty() {
+        return Some(None);
     }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
+    if let Ok(n) = x.parse::<u32>() {
+        return Some(Some(n));
     }
-    pi == p.len()
+    nix::unistd::User::from_name(x)
+        .ok()
+        .flatten()
+        .map(|u| Some(u.uid.as_raw()))
 }
+
+#[cfg(unix)]
+fn resolve_group(x: &str) -> Option<Option<u32>> {
+    if x.is_empty() {
+        return Some(None);
+    }
+    if let Ok(n) = x.parse::<u32>() {
+        return Some(Some(n));
+    }
+    nix::unistd::Group::from_name(x)
+        .ok()
+        .flatten()
+        .map(|g| Some(g.gid.as_raw()))
+}
+
+#[cfg(not(unix))]
+fn resolve_user(x: &str) -> Option<Option<u32>> {
+    if x.is_empty() {
+        return Some(None);
+    }
+    x.parse::<u32>().ok().map(Some)
+}
+
+#[cfg(not(unix))]
+fn resolve_group(x: &str) -> Option<Option<u32>> {
+    if x.is_empty() {
+        return Some(None);
+    }
+    x.parse::<u32>().ok().map(Some)
+}
+
+/// Build a default link path for a hardlink/symlink dialog: the cursored
+/// entry's local sibling with `_link` suffix. Returns the full path so the
+/// user can edit just the trailing component.
+fn default_link_name(src: &VPath) -> String {
+    let layer = match src.last() {
+        Some(l) => l,
+        None => return String::new(),
+    };
+    let mut sub = layer.sub.clone();
+    let stem = sub.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+    let parent = sub.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let link_name = format!("{stem}_link");
+    sub = parent;
+    sub.push(link_name);
+    sub.to_string_lossy().into_owned()
+}
+
+fn apply_panel_snapshot(p: &mut PanelState, s: &mc_config::PanelStateSnapshot) {
+    p.sort_by = s.sort_by;
+    p.reverse = s.reverse;
+    p.show_hidden = s.show_hidden;
+    p.mix_dirs = s.mix_dirs;
+    p.filter = s.filter.clone();
+    p.mode = match s.listing.as_str() {
+        "Brief" => ListingMode::Brief,
+        "Long" => ListingMode::Long,
+        "Tree" => ListingMode::Tree,
+        _ => ListingMode::Full,
+    };
+}
+
+fn panel_snapshot(p: &PanelState) -> mc_config::PanelStateSnapshot {
+    mc_config::PanelStateSnapshot {
+        sort_by: p.sort_by,
+        reverse: p.reverse,
+        listing: match p.mode {
+            ListingMode::Full => "Full".into(),
+            ListingMode::Brief => "Brief".into(),
+            ListingMode::Long => "Long".into(),
+            ListingMode::Tree => "Tree".into(),
+        },
+        show_hidden: p.show_hidden,
+        mix_dirs: p.mix_dirs,
+        filter: p.filter.clone(),
+    }
+}
+
+use crate::glob::glob_match;
 
 #[must_use]
 pub fn vpath_to_local(p: &VPath) -> Option<PathBuf> {
@@ -1881,16 +2542,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glob_basic() {
-        assert!(glob_match("*", "anything"));
-        assert!(glob_match("*.txt", "foo.txt"));
-        assert!(glob_match("*.txt", "FOO.TXT"));
-        assert!(glob_match("?oo.txt", "foo.txt"));
-        assert!(glob_match("foo*bar", "fooXYZbar"));
-        assert!(!glob_match("*.txt", "foo.md"));
-        assert!(!glob_match("foo", "bar"));
-        assert!(glob_match("", ""));
-        assert!(!glob_match("", "x"));
+    fn parse_chown_numeric_pair() {
+        assert_eq!(parse_chown("1000:2000"), Some((Some(1000), Some(2000))));
+        assert_eq!(parse_chown("1000"), Some((Some(1000), None)));
+        assert_eq!(parse_chown(":2000"), Some((None, Some(2000))));
+        assert_eq!(parse_chown(""), None);
+        assert_eq!(parse_chown("   "), None);
     }
 
     #[test]

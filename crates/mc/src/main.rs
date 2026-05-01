@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use mc_config::AppConfig;
+use mc_config::{AppConfig, ConfigPaths};
 use mc_tui::App;
 use tracing_subscriber::EnvFilter;
 
@@ -43,7 +43,11 @@ fn main() -> Result<()> {
 
     let print_cwd = args.print_cwd.clone();
     let exit_info = runtime.block_on(async move {
-        let config = AppConfig::default();
+        let paths = ConfigPaths::discover();
+        let config = AppConfig::load(&paths.main_config()).unwrap_or_else(|e| {
+            tracing::warn!("config load: {e}; using defaults");
+            AppConfig::default()
+        });
         let (app, job_rx) = App::new(config, start);
         mc_tui::run(app, job_rx).await
     })?;

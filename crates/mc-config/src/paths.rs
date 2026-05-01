@@ -57,4 +57,22 @@ impl ConfigPaths {
     pub fn log_dir(&self) -> PathBuf {
         self.cache_dir.join("log")
     }
+
+    /// Path to the user-defined menu file (the F2 / Command → User menu source).
+    #[must_use]
+    pub fn user_menu(&self) -> PathBuf {
+        self.config_dir.join("menu.toml")
+    }
+
+    /// Path to the file-extension binding rules.
+    #[must_use]
+    pub fn extbind(&self) -> PathBuf {
+        self.config_dir.join("extbind.toml")
+    }
+
+    /// Path to the file-highlighting rules.
+    #[must_use]
+    pub fn filehighlight(&self) -> PathBuf {
+        self.config_dir.join("filehighlight.toml")
+    }
 }

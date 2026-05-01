@@ -10,7 +10,7 @@ pub mod paths;
 pub mod scheme;
 pub mod skin;
 
-pub use app::AppConfig;
+pub use app::{AppConfig, LayoutConfig, PanelStateSnapshot, VfsConfig};
 pub use extbind::{CompiledExtBindings, ExtAction, ExtBindRule, ExtBindings};
 pub use filehighlight::{FileHighlight, HighlightRule};
 pub use history::History;

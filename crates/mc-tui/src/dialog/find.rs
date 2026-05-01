@@ -17,6 +17,9 @@ pub struct FindParams {
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub ignore_dirs: String, // colon-separated
+    /// When `true`, the run replaces the active panel's entries with the
+    /// hits (Find-and-panelize) instead of opening the results dialog.
+    pub panelize: bool,
 }
 
 impl Default for FindParams {
@@ -27,6 +30,7 @@ impl Default for FindParams {
             case_sensitive: false,
             whole_word: false,
             ignore_dirs: ".git:node_modules:target".into(),
+            panelize: false,
         }
     }
 }
@@ -193,6 +197,8 @@ pub struct FindResults {
 
 pub enum FindResultsOutcome {
     Navigate(VPath),
+    /// Replace the active panel's entries with the entire result list.
+    Panelize(Vec<VPath>),
 }
 
 impl FindResults {
@@ -278,7 +284,7 @@ impl Dialog for FindResults {
             layout[1],
         );
         f.render_widget(
-            Paragraph::new(Line::from("Enter: cd to dir   Esc: close")).style(
+            Paragraph::new(Line::from("Enter: cd    P: panelize    Esc: close")).style(
                 Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg)),
             ),
             layout[2],
@@ -325,6 +331,13 @@ impl Dialog for FindResults {
                     DialogOutcome::Submitted(FindResultsOutcome::Navigate(p))
                 } else {
                     DialogOutcome::None
+                }
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                if self.items.is_empty() {
+                    DialogOutcome::None
+                } else {
+                    DialogOutcome::Submitted(FindResultsOutcome::Panelize(self.items.clone()))
                 }
             }
             _ => DialogOutcome::None,

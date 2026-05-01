@@ -27,6 +27,11 @@ notify = { version = "8", default-features = false, features = ["macos_kqueue"] 
 arboard = { version = "3", default-features = false }
 base64 = "0.22"
 encoding_rs = "0.8"
+walkdir = "2"
+pathdiff = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["user", "fs"] }
 
 [features]
 default = []

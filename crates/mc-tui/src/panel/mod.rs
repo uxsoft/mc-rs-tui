@@ -74,6 +74,14 @@ pub struct PanelState {
     /// Back/forward history of cwds visited from this panel.
     pub history: Vec<VPath>,
     pub history_pos: usize,
+    /// Optional name-glob filter applied at `apply_filter_sort` time.
+    pub filter: Option<String>,
+    /// `true` once "Show directory sizes" has populated subdir sizes for the
+    /// current cwd. Cleared on `navigate`.
+    pub sizes_computed: bool,
+    /// `true` when the panel was populated by Find-and-panelize / External
+    /// panelize. Suppresses the next reload from VFS.
+    pub is_virtual_panelized: bool,
 }
 
 impl PanelState {
@@ -94,12 +102,21 @@ impl PanelState {
             tree: TreeState::default(),
             marks: HashSet::new(),
             history_pos: 0,
+            filter: None,
+            sizes_computed: false,
+            is_virtual_panelized: false,
         }
     }
 
     pub fn apply_filter_sort(&mut self) {
         if !self.show_hidden {
             self.entries.retain(|e| !e.name.starts_with('.') || e.name == "..");
+        }
+        if let Some(g) = self.filter.as_deref() {
+            if !g.is_empty() {
+                self.entries
+                    .retain(|e| e.name == ".." || crate::glob::glob_match(g, &e.name));
+            }
         }
         sort_entries(&mut self.entries, self.sort_by, self.reverse, self.mix_dirs);
         if self.cursor >= self.entries.len() {
@@ -117,6 +134,8 @@ impl PanelState {
         self.cursor = 0;
         self.view_offset = 0;
         self.marks.clear();
+        self.sizes_computed = false;
+        self.is_virtual_panelized = false;
     }
 
     pub fn history_back(&mut self) -> bool {

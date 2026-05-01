@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -51,6 +52,10 @@ impl Drop for TerminalGuard {
 struct FindStream {
     rx: tokio::sync::mpsc::Receiver<FindEvent>,
     cancel: CancellationToken,
+    /// When true, the active panel is replaced with the hit list on
+    /// completion (Find-and-panelize). Otherwise the FindResults modal
+    /// stays open for the user.
+    panelize: bool,
 }
 
 /// Outcome of a TUI session; the binary may serialize it (`-P FILE`).
@@ -150,7 +155,14 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
                     FindEvent::Matched(m) => app.find_push(m.path),
                     FindEvent::Done => {
                         app.find_finish();
+                        let was_panelize = find.as_ref().map(|f| f.panelize).unwrap_or(false);
                         find = None;
+                        if was_panelize {
+                            let items = app.find_results_items();
+                            if !items.is_empty() {
+                                app.panelize_active(items);
+                            }
+                        }
                     }
                 }
                 redraw = true;
@@ -406,8 +418,9 @@ async fn run_op<B: ratatui::backend::Backend>(
             );
             app.show_find_results(summary);
             let cancel = CancellationToken::new();
+            let panelize = params.panelize;
             let rx = mc_find::run(vfs, q, cancel.clone());
-            *find = Some(FindStream { rx, cancel });
+            *find = Some(FindStream { rx, cancel, panelize });
         }
         PendingOp::RetryRemoteWithPassword { scheme, location, password } => {
             match scheme.as_str() {
@@ -480,6 +493,191 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             let _ = terminal.clear();
             app.refresh_active().await;
+        }
+        PendingOp::Chown { targets, uid, gid } => {
+            #[cfg(unix)]
+            {
+                use nix::unistd::{chown, Gid, Uid};
+                for t in targets {
+                    let Some(local) = crate::app::vpath_to_local(&t) else {
+                        app.set_status("chown: remote not supported");
+                        continue;
+                    };
+                    let u = uid.map(Uid::from_raw);
+                    let g = gid.map(Gid::from_raw);
+                    if let Err(e) = chown(&local, u, g) {
+                        tracing::warn!("chown {}: {e}", local.display());
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (targets, uid, gid);
+                app.set_status("chown: unix-only");
+            }
+            app.refresh_active().await;
+        }
+        PendingOp::Hardlink { src, link } => {
+            if let Err(e) = std::fs::hard_link(&src, &link) {
+                tracing::warn!("hardlink {} -> {}: {e}", src.display(), link.display());
+                app.set_status(format!("hardlink failed: {e}"));
+            }
+            app.refresh_active().await;
+        }
+        PendingOp::Symlink { target, link, relative } => {
+            #[cfg(unix)]
+            {
+                let actual = if relative {
+                    let parent = link.parent().unwrap_or(std::path::Path::new(""));
+                    pathdiff::diff_paths(&target, parent).unwrap_or_else(|| target.clone())
+                } else {
+                    target.clone()
+                };
+                if let Err(e) = std::os::unix::fs::symlink(&actual, &link) {
+                    tracing::warn!("symlink {} -> {}: {e}", actual.display(), link.display());
+                    app.set_status(format!("symlink failed: {e}"));
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (target, link, relative);
+                app.set_status("symlink: unix-only");
+            }
+            app.refresh_active().await;
+        }
+        PendingOp::EditSymlink { link, new_target } => {
+            // Best-effort: remove + recreate. There is a brief window where
+            // the symlink doesn't exist; acceptable for an interactive op.
+            if let Err(e) = std::fs::remove_file(&link) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("edit symlink remove {}: {e}", link.display());
+                    app.set_status(format!("edit symlink: {e}"));
+                    return;
+                }
+            }
+            #[cfg(unix)]
+            {
+                if let Err(e) = std::os::unix::fs::symlink(&new_target, &link) {
+                    tracing::warn!(
+                        "edit symlink create {} -> {}: {e}",
+                        new_target.display(),
+                        link.display()
+                    );
+                    app.set_status(format!("edit symlink: {e}"));
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (link, new_target);
+            }
+            app.refresh_active().await;
+        }
+        PendingOp::ComputeSizes { cwd } => {
+            let local = match crate::app::vpath_to_local(&cwd) {
+                Some(p) => p,
+                None => {
+                    app.set_status("directory sizes: local panels only");
+                    return;
+                }
+            };
+            let entries = if app.active_left {
+                app.left.entries.clone()
+            } else {
+                app.right.entries.clone()
+            };
+            let mut sizes: Vec<(String, u64)> = Vec::new();
+            for e in entries.iter().filter(|e| e.name != "..") {
+                if !matches!(e.kind, mc_core::EntryKind::Dir) {
+                    continue;
+                }
+                let dir = local.join(&e.name);
+                let mut total: u64 = 0;
+                for entry in walkdir::WalkDir::new(&dir)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                {
+                    if entry.file_type().is_file() {
+                        if let Ok(md) = entry.metadata() {
+                            total = total.saturating_add(md.len());
+                        }
+                    }
+                }
+                sizes.push((e.name.clone(), total));
+            }
+            let panel = if app.active_left {
+                &mut app.left
+            } else {
+                &mut app.right
+            };
+            for entry in &mut panel.entries {
+                if let Some((_, sz)) = sizes.iter().find(|(n, _)| n == &entry.name) {
+                    entry.size = *sz;
+                }
+            }
+            panel.sizes_computed = true;
+            app.set_status("directory sizes computed");
+        }
+        PendingOp::ExternalPanelize { cwd, cmd } => {
+            use tokio::process::Command;
+            let out = match Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .current_dir(&cwd)
+                .output()
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!("external panelize: {e}");
+                    app.set_status(format!("external panelize: {e}"));
+                    return;
+                }
+            };
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut entries: Vec<mc_core::Entry> = Vec::new();
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let p = std::path::PathBuf::from(line);
+                let abs = if p.is_absolute() { p } else { cwd.join(p) };
+                let md = match std::fs::symlink_metadata(&abs) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let kind = if md.is_dir() {
+                    mc_core::EntryKind::Dir
+                } else if md.file_type().is_symlink() {
+                    mc_core::EntryKind::Symlink
+                } else {
+                    mc_core::EntryKind::File
+                };
+                entries.push(mc_core::Entry {
+                    name: abs.to_string_lossy().into_owned(),
+                    kind,
+                    size: md.len(),
+                    mtime: None,
+                    atime: None,
+                    ctime: None,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    nlink: None,
+                    target: None,
+                });
+            }
+            let panel = if app.active_left {
+                &mut app.left
+            } else {
+                &mut app.right
+            };
+            panel.entries = entries;
+            panel.cursor = 0;
+            panel.view_offset = 0;
+            panel.is_virtual_panelized = true;
+            app.set_status("panel populated by external command");
         }
     }
 }

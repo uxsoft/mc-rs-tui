@@ -45,6 +45,14 @@ impl Registry {
         self.by_pair.remove(&(scheme.to_string(), location.to_string()));
     }
 
+    /// Snapshot of all per-(scheme, location) mounts. The order is
+    /// implementation-defined; callers should sort if a stable display order
+    /// is required.
+    #[must_use]
+    pub fn mounts(&self) -> Vec<(String, String)> {
+        self.by_pair.keys().cloned().collect()
+    }
+
     /// Resolve the backend for the *last* layer of `p` (the deepest archive).
     pub fn root_for(&self, p: &VPath) -> Result<Arc<dyn Vfs>> {
         let layer = p
