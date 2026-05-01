@@ -79,6 +79,11 @@ pub struct PanelState {
     /// `true` once "Show directory sizes" has populated subdir sizes for the
     /// current cwd. Cleared on `navigate`.
     pub sizes_computed: bool,
+    /// Names of directory entries whose recursive size has been computed
+    /// (via Space on a single dir, or the panel-wide "Show directory sizes").
+    /// Directories not in this set render as `<DIR>` instead of a byte count.
+    /// Cleared on navigate / history back / history forward.
+    pub computed_dir_sizes: HashSet<String>,
     /// `true` when the panel was populated by Find-and-panelize / External
     /// panelize. Suppresses the next reload from VFS.
     pub is_virtual_panelized: bool,
@@ -104,6 +109,7 @@ impl PanelState {
             history_pos: 0,
             filter: None,
             sizes_computed: false,
+            computed_dir_sizes: HashSet::new(),
             is_virtual_panelized: false,
         }
     }
@@ -136,6 +142,7 @@ impl PanelState {
         self.view_offset = 0;
         self.marks.clear();
         self.sizes_computed = false;
+        self.computed_dir_sizes.clear();
         self.is_virtual_panelized = false;
     }
 
@@ -148,6 +155,8 @@ impl PanelState {
         self.cursor = 0;
         self.view_offset = 0;
         self.marks.clear();
+        self.sizes_computed = false;
+        self.computed_dir_sizes.clear();
         true
     }
 
@@ -160,6 +169,8 @@ impl PanelState {
         self.cursor = 0;
         self.view_offset = 0;
         self.marks.clear();
+        self.sizes_computed = false;
+        self.computed_dir_sizes.clear();
         true
     }
 
@@ -310,7 +321,7 @@ pub fn render_panel(
             String::from("(empty tree)")
         }
     } else if let Some(e) = state.entries.get(state.cursor) {
-        format!("{:>10}  {}", human_size(e.size), e.name)
+        format!("{:>10}  {}", size_cell(e, &state.computed_dir_sizes), e.name)
     } else {
         String::from("(empty)")
     };
@@ -338,8 +349,18 @@ fn render_entries(
         let is_cursor = i == state.cursor && state.active;
         let is_marked = state.marks.contains(&e.name);
         lines.push(format_line(
-            e, state.mode, width, is_cursor, is_marked, highlight, scheme, bg, cursor_bg,
-            cursor_fg, marked_fg,
+            e,
+            state.mode,
+            width,
+            is_cursor,
+            is_marked,
+            highlight,
+            scheme,
+            bg,
+            cursor_bg,
+            cursor_fg,
+            marked_fg,
+            &state.computed_dir_sizes,
         ));
     }
     lines
@@ -358,6 +379,7 @@ fn format_line(
     cursor_bg: Color,
     cursor_fg: Color,
     marked_fg: Color,
+    computed_sizes: &HashSet<String>,
 ) -> Line<'static> {
     let mut style = entry_style(e, highlight, scheme, bg);
     if is_marked {
@@ -371,7 +393,7 @@ fn format_line(
         ListingMode::Full => format!(
             "{:<name$} {:>10}",
             e.name,
-            human_size(e.size),
+            size_cell(e, computed_sizes),
             name = width.saturating_sub(13)
         ),
         ListingMode::Long => {
@@ -380,7 +402,7 @@ fn format_line(
                 "{} {:>4} {:>10} {:<name$}",
                 mode_str,
                 e.nlink.unwrap_or(0),
-                human_size(e.size),
+                size_cell(e, computed_sizes),
                 e.name,
                 name = width.saturating_sub(28),
             )
@@ -473,6 +495,16 @@ fn unix_mode_str(e: &Entry) -> String {
         bit(0o002, 'w'),
         bit(0o001, 'x'),
     )
+}
+
+fn size_cell(e: &Entry, computed: &HashSet<String>) -> String {
+    if e.name == ".." {
+        return "UP--DIR".into();
+    }
+    if matches!(e.kind, EntryKind::Dir) && !computed.contains(&e.name) {
+        return "<DIR>".into();
+    }
+    human_size(e.size)
 }
 
 fn human_size(bytes: u64) -> String {

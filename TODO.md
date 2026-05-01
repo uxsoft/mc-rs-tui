@@ -1,4 +1,5 @@
-- Add F before all the numbers on the buttons below
-- Theme switcher menu item
-- Make the application fully navigable via mouse as well as keyboard
 - Streamline the user experience for copying, moving, deleting, ...
+- https://github.com/sxyazi/yazi
+  - icons
+  - image preview using F3
+  - F3 preview using cat / bat inside a dialog

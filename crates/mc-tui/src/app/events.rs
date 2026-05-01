@@ -274,8 +274,27 @@ impl App {
                 Disposition::Redraw
             }
             (KeyCode::Char(' '), m) if m.is_empty() || m == KeyMods::SHIFT => {
+                let mut compute: Option<PendingOp> = None;
+                {
+                    let p = self.active();
+                    if let Some(e) = p.entries.get(p.cursor) {
+                        if matches!(e.kind, EntryKind::Dir)
+                            && e.name != ".."
+                            && !p.computed_dir_sizes.contains(&e.name)
+                        {
+                            compute = Some(PendingOp::ComputeDirSize {
+                                cwd: p.cwd.clone(),
+                                name: e.name.clone(),
+                            });
+                        }
+                    }
+                }
                 self.active().toggle_mark();
-                Disposition::Redraw
+                if let Some(op) = compute {
+                    Disposition::RunOp(op)
+                } else {
+                    Disposition::Redraw
+                }
             }
 
             // Hidden toggle

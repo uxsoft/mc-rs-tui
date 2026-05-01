@@ -162,6 +162,12 @@ pub enum PendingOp {
     ComputeSizes {
         cwd: VPath,
     },
+    /// Recursively compute size of a single subdirectory `name` of `cwd`.
+    /// Local only. Triggered by Space on a directory.
+    ComputeDirSize {
+        cwd: VPath,
+        name: String,
+    },
     /// Run `cmd` via `sh -c`, parse stdout as one path per line, and
     /// populate the active panel with those entries.
     ExternalPanelize {

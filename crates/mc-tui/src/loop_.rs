@@ -742,7 +742,7 @@ async fn run_op<B: ratatui::backend::Backend>(
                 }
                 let dir = local.join(&e.name);
                 let mut total: u64 = 0;
-                for entry in walkdir::WalkDir::new(&dir)
+                for entry in jwalk::WalkDir::new(&dir)
                     .follow_links(false)
                     .into_iter()
                     .filter_map(Result::ok)
@@ -765,8 +765,48 @@ async fn run_op<B: ratatui::backend::Backend>(
                     entry.size = *sz;
                 }
             }
+            for (name, _) in &sizes {
+                panel.computed_dir_sizes.insert(name.clone());
+            }
             panel.sizes_computed = true;
             app.set_status("directory sizes computed");
+        }
+        PendingOp::ComputeDirSize { cwd, name } => {
+            let Some(local) = crate::app::vpath_to_local(&cwd) else {
+                app.set_status("directory sizes: local panels only");
+                return;
+            };
+            let dir = local.join(&name);
+            let total = tokio::task::spawn_blocking(move || {
+                let mut total: u64 = 0;
+                for entry in jwalk::WalkDir::new(&dir)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                {
+                    if entry.file_type().is_file() {
+                        if let Ok(md) = entry.metadata() {
+                            total = total.saturating_add(md.len());
+                        }
+                    }
+                }
+                total
+            })
+            .await
+            .unwrap_or(0);
+
+            let panel = if app.active_left {
+                &mut app.left
+            } else {
+                &mut app.right
+            };
+            if panel.cwd == cwd {
+                if let Some(entry) = panel.entries.iter_mut().find(|e| e.name == name) {
+                    entry.size = total;
+                }
+                panel.computed_dir_sizes.insert(name.clone());
+            }
+            app.set_status(format!("{name}: {total} bytes"));
         }
         PendingOp::ExternalPanelize { cwd, cmd } => {
             use tokio::process::Command;
