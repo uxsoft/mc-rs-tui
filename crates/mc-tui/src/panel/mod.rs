@@ -5,7 +5,7 @@ pub mod sort;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use mc_config::{ColorScheme, FileHighlight, IconMode, icon_for_name};
+use mc_config::{ColorScheme, FileHighlight, icon_for_name};
 use mc_core::action::SortKey;
 use mc_core::{Entry, EntryKind, VPath};
 
@@ -242,7 +242,7 @@ pub fn panel_body_rect(area: Rect) -> Rect {
 /// Decorations toggled by user options that affect per-row rendering.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PanelDecor {
-    pub icons: IconMode,
+    pub icons: bool,
     pub git_status: bool,
 }
 
@@ -428,7 +428,7 @@ fn format_line(
     let git_cols = if git_prefix.is_empty() { 0 } else { 2 };
     // Icon prefix (2 cols: glyph + space) only when configured. Skipped for
     // `..` so the parent-up entry stays visually distinct.
-    let icon_prefix: String = if decor.icons.enabled() && e.name != ".." {
+    let icon_prefix: String = if decor.icons && e.name != ".." {
         format!("{} ", icon_for_name(&e.name, e.kind))
     } else {
         String::new()

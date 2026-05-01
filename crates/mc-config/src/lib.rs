@@ -17,7 +17,7 @@ pub use extbind::{CompiledExtBindings, ExtAction, ExtBindRule, ExtBindings};
 pub use filehighlight::{FileHighlight, HighlightRule};
 pub use history::History;
 pub use hotlist::{Hotlist, HotlistEntry};
-pub use icons::{IconMode, icon_for_kind, icon_for_name};
+pub use icons::{icon_for_kind, icon_for_name};
 pub use io::{load_toml_or_default, write_user_file_atomic};
 pub use keymap::{Keymap, KeymapFile, RemapEntry};
 pub use paths::ConfigPaths;

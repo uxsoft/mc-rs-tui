@@ -76,11 +76,12 @@ pub struct ColorScheme {
 
 impl ColorScheme {
     /// Look up a built-in theme by its lowercase name.
-    /// Recognised: `modern-dark`, `tokyo-night`, `solarized-light`.
+    /// Recognised: `modern-dark`, `catppuccin-mocha`, `tokyo-night`, `solarized-light`.
     #[must_use]
     pub fn from_named(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "modern-dark" | "modern_dark" | "default" => Some(Self::modern_dark()),
+            "catppuccin-mocha" | "catppuccin_mocha" | "mocha" => Some(Self::catppuccin_mocha()),
             "tokyo-night" | "tokyo_night" => Some(Self::tokyo_night()),
             "solarized-light" | "solarized_light" => Some(Self::solarized_light()),
             _ => None,
@@ -93,6 +94,7 @@ impl ColorScheme {
     pub fn available_themes() -> &'static [(&'static str, &'static str)] {
         &[
             ("modern-dark", "Modern Dark"),
+            ("catppuccin-mocha", "Catppuccin Mocha"),
             ("tokyo-night", "Tokyo Night"),
             ("solarized-light", "Solarized Light"),
         ]
@@ -175,6 +177,96 @@ impl ColorScheme {
             diff_del_fg: red,
 
             muted_fg: surface2,
+        }
+    }
+
+    /// Catppuccin Mocha — official palette per the style guide
+    /// (<https://github.com/catppuccin/catppuccin/blob/main/docs/style-guide.md>).
+    /// Mauve is the canonical accent for Mocha.
+    #[must_use]
+    pub fn catppuccin_mocha() -> Self {
+        // Surfaces / overlays / text (palette names match the style guide).
+        let crust = ThemeColor::rgb(0x11, 0x11, 0x1b);
+        let mantle = ThemeColor::rgb(0x18, 0x18, 0x25);
+        let base = ThemeColor::rgb(0x1e, 0x1e, 0x2e);
+        let surface0 = ThemeColor::rgb(0x31, 0x32, 0x44);
+        let surface1 = ThemeColor::rgb(0x45, 0x47, 0x5a);
+        let surface2 = ThemeColor::rgb(0x58, 0x5b, 0x70);
+        let overlay0 = ThemeColor::rgb(0x6c, 0x70, 0x86);
+        let subtext0 = ThemeColor::rgb(0xa6, 0xad, 0xc8);
+        let subtext1 = ThemeColor::rgb(0xba, 0xc2, 0xde);
+        let text = ThemeColor::rgb(0xcd, 0xd6, 0xf4);
+        // Accents.
+        let pink = ThemeColor::rgb(0xf5, 0xc2, 0xe7);
+        let mauve = ThemeColor::rgb(0xcb, 0xa6, 0xf7);
+        let red = ThemeColor::rgb(0xf3, 0x8b, 0xa8);
+        let peach = ThemeColor::rgb(0xfa, 0xb3, 0x87);
+        let yellow = ThemeColor::rgb(0xf9, 0xe2, 0xaf);
+        let green = ThemeColor::rgb(0xa6, 0xe3, 0xa1);
+        let teal = ThemeColor::rgb(0x94, 0xe2, 0xd5);
+        let sapphire = ThemeColor::rgb(0x74, 0xc7, 0xec);
+        let blue = ThemeColor::rgb(0x89, 0xb4, 0xfa);
+        let lavender = ThemeColor::rgb(0xb4, 0xbe, 0xfe);
+
+        Self {
+            // Mauve drives the active-focus accent (canonical Mocha accent).
+            panel_bg: base,
+            panel_fg: text,
+            panel_dim_fg: subtext1,
+            panel_border: surface1,
+            panel_border_active: mauve,
+            panel_title_fg: subtext0,
+            panel_title_active_bg: mauve,
+            panel_title_active_fg: base,
+            cursor_bg: mauve,
+            cursor_fg: base,
+            marked_fg: yellow,
+
+            file_dir: blue,
+            file_symlink: teal,
+            file_executable: green,
+            file_device: yellow,
+            file_special: lavender,
+            file_archive: red,
+            file_image: pink,
+            file_media: pink,
+            file_doc: text,
+            file_source: sapphire,
+            file_build: peach,
+
+            dialog_bg: surface0,
+            dialog_fg: text,
+            dialog_border: mauve,
+            dialog_title_fg: mauve,
+            dialog_focus_bg: yellow,
+            dialog_focus_fg: base,
+            input_bg: surface2,
+            input_fg: text,
+
+            danger_bg: red,
+            danger_fg: base,
+            danger_focus_bg: yellow,
+            danger_focus_fg: base,
+
+            statusbar_bg: mantle,
+            statusbar_fg: subtext1,
+            buttonbar_bg: crust,
+            buttonbar_fg: subtext1,
+            buttonbar_label_bg: mauve,
+            buttonbar_label_fg: base,
+            search_bg: yellow,
+            search_fg: base,
+            op_status_bg: yellow,
+            op_status_fg: base,
+
+            // Tinted diff bands consistent with the palette: green/red on
+            // darkened mantle so the surrounding panel still reads as base.
+            diff_add_bg: ThemeColor::rgb(0x26, 0x3a, 0x29),
+            diff_add_fg: green,
+            diff_del_bg: ThemeColor::rgb(0x3f, 0x22, 0x2a),
+            diff_del_fg: red,
+
+            muted_fg: overlay0,
         }
     }
 
@@ -410,9 +502,20 @@ mod tests {
     fn lookup_named_themes() {
         assert!(ColorScheme::from_named("modern-dark").is_some());
         assert!(ColorScheme::from_named("Modern_Dark").is_some());
+        assert!(ColorScheme::from_named("catppuccin-mocha").is_some());
+        assert!(ColorScheme::from_named("Catppuccin_Mocha").is_some());
+        assert!(ColorScheme::from_named("mocha").is_some());
         assert!(ColorScheme::from_named("tokyo-night").is_some());
         assert!(ColorScheme::from_named("solarized-light").is_some());
         assert!(ColorScheme::from_named("nope").is_none());
+    }
+
+    #[test]
+    fn catppuccin_mocha_uses_palette() {
+        let s = ColorScheme::catppuccin_mocha();
+        // Mauve accent on focus, base background.
+        assert_eq!(s.cursor_bg, ThemeColor::Rgb(0xcb, 0xa6, 0xf7));
+        assert_eq!(s.panel_bg, ThemeColor::Rgb(0x1e, 0x1e, 0x2e));
     }
 
     #[test]
