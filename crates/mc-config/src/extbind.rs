@@ -28,8 +28,14 @@ pub struct ExtBindings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtBindRule {
-    /// Filename glob (case-insensitive).
+    /// Filename glob (case-insensitive). At least one of `glob` or `mime`
+    /// must match for the rule to apply. An empty glob is ignored.
+    #[serde(default)]
     pub glob: String,
+    /// MIME glob (e.g. `image/*`, `text/plain`). Matched against the file's
+    /// detected MIME type when supplied. `None` (or empty) skips MIME match.
+    #[serde(default)]
+    pub mime: Option<String>,
     pub open: Option<String>,
     pub view: Option<String>,
     pub edit: Option<String>,
@@ -43,35 +49,89 @@ pub enum ExtAction {
 }
 
 #[derive(Debug)]
+struct CompiledRule {
+    glob: Option<GlobMatcher>,
+    mime: Option<GlobMatcher>,
+    rule: ExtBindRule,
+}
+
+#[derive(Debug)]
 pub struct CompiledExtBindings {
-    rules: Vec<(GlobMatcher, ExtBindRule)>,
+    rules: Vec<CompiledRule>,
 }
 
 impl CompiledExtBindings {
     pub fn from_config(cfg: &ExtBindings) -> Self {
         let mut rules = Vec::new();
         for r in &cfg.bind {
-            match build_glob(&r.glob) {
-                Ok(g) => rules.push((g, r.clone())),
-                Err(e) => tracing::warn!("extbind: bad glob {:?}: {e}", r.glob),
+            let glob = if r.glob.is_empty() {
+                None
+            } else {
+                match build_glob(&r.glob) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        tracing::warn!("extbind: bad glob {:?}: {e}", r.glob);
+                        continue;
+                    }
+                }
+            };
+            let mime = match r.mime.as_deref().filter(|s| !s.is_empty()) {
+                Some(m) => match build_glob(m) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        tracing::warn!("extbind: bad mime glob {:?}: {e}", m);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            if glob.is_none() && mime.is_none() {
+                tracing::warn!("extbind: rule has neither glob nor mime; skipping");
+                continue;
             }
+            rules.push(CompiledRule {
+                glob,
+                mime,
+                rule: r.clone(),
+            });
         }
         Self { rules }
     }
 
-    /// Look up the template for `name` + `action`. Returns `None` if no rule matches.
+    /// Look up the template for `name` + optional MIME + `action`. Returns
+    /// `None` if no rule matches. A rule matches when *any* of its provided
+    /// matchers (glob or mime) matches; rules with both must match both.
     #[must_use]
-    pub fn lookup(&self, name: &str, action: ExtAction) -> Option<&str> {
-        for (g, r) in &self.rules {
-            if g.is_match(name) {
-                let t = match action {
-                    ExtAction::Open => r.open.as_deref(),
-                    ExtAction::View => r.view.as_deref(),
-                    ExtAction::Edit => r.edit.as_deref(),
-                };
-                if t.is_some() {
-                    return t;
-                }
+    pub fn lookup(&self, name: &str, mime: Option<&str>, action: ExtAction) -> Option<&str> {
+        for cr in &self.rules {
+            let glob_ok = match &cr.glob {
+                Some(g) => g.is_match(name),
+                None => true,
+            };
+            let mime_ok = match (&cr.mime, mime) {
+                (Some(m), Some(actual)) => m.is_match(actual),
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            // Require at least one of the two matchers actually matched on
+            // its own merits (avoids "no glob, no mime → match anything").
+            let glob_active = cr.glob.is_some();
+            let mime_active = cr.mime.is_some();
+            let any_match = (glob_active && glob_ok) || (mime_active && mime_ok);
+            if !any_match {
+                continue;
+            }
+            // If both are specified, both must match.
+            if glob_active && mime_active && !(glob_ok && mime_ok) {
+                continue;
+            }
+            let t = match action {
+                ExtAction::Open => cr.rule.open.as_deref(),
+                ExtAction::View => cr.rule.view.as_deref(),
+                ExtAction::Edit => cr.rule.edit.as_deref(),
+            };
+            if t.is_some() {
+                return t;
             }
         }
         None
@@ -99,18 +159,21 @@ impl ExtBindings {
             bind: vec![
                 ExtBindRule {
                     glob: "*.{png,jpg,jpeg,gif,webp,bmp,svg}".into(),
+                    mime: None,
                     open: Some("xdg-open %f".into()),
                     view: None,
                     edit: None,
                 },
                 ExtBindRule {
                     glob: "*.pdf".into(),
+                    mime: None,
                     open: Some("xdg-open %f".into()),
                     view: None,
                     edit: None,
                 },
                 ExtBindRule {
                     glob: "*.html".into(),
+                    mime: None,
                     open: Some("xdg-open %f".into()),
                     view: None,
                     edit: None,
@@ -135,8 +198,11 @@ mod tests {
     fn match_image_open() {
         let cfg = ExtBindings::defaults();
         let c = CompiledExtBindings::from_config(&cfg);
-        assert_eq!(c.lookup("foo.PNG", ExtAction::Open), Some("xdg-open %f"));
-        assert_eq!(c.lookup("foo.txt", ExtAction::Open), None);
+        assert_eq!(
+            c.lookup("foo.PNG", None, ExtAction::Open),
+            Some("xdg-open %f")
+        );
+        assert_eq!(c.lookup("foo.txt", None, ExtAction::Open), None);
     }
 
     #[test]
@@ -150,8 +216,8 @@ mod tests {
         )
         .unwrap();
         let c = CompiledExtBindings::from_config(&cfg);
-        assert_eq!(c.lookup("lib.rs", ExtAction::View), Some("bat %f"));
-        assert_eq!(c.lookup("lib.rs", ExtAction::Open), None);
+        assert_eq!(c.lookup("lib.rs", None, ExtAction::View), Some("bat %f"));
+        assert_eq!(c.lookup("lib.rs", None, ExtAction::Open), None);
     }
 
     #[test]
@@ -165,7 +231,52 @@ mod tests {
         )
         .unwrap();
         let c = CompiledExtBindings::from_config(&cfg);
-        assert_eq!(c.lookup("anything", ExtAction::View), Some("less %f"));
-        assert_eq!(c.lookup("anything", ExtAction::Open), None);
+        assert_eq!(c.lookup("anything", None, ExtAction::View), Some("less %f"));
+        assert_eq!(c.lookup("anything", None, ExtAction::Open), None);
+    }
+
+    #[test]
+    fn mime_only_rule_matches_by_mime() {
+        let cfg = ExtBindings::from_toml(
+            r#"
+            [[bind]]
+            mime = "image/*"
+            open = "feh %f"
+            "#,
+        )
+        .unwrap();
+        let c = CompiledExtBindings::from_config(&cfg);
+        assert_eq!(
+            c.lookup("file-without-ext", Some("image/png"), ExtAction::Open),
+            Some("feh %f")
+        );
+        assert_eq!(
+            c.lookup("file-without-ext", Some("text/plain"), ExtAction::Open),
+            None
+        );
+        assert_eq!(c.lookup("file-without-ext", None, ExtAction::Open), None);
+    }
+
+    #[test]
+    fn glob_and_mime_must_both_match_when_both_present() {
+        let cfg = ExtBindings::from_toml(
+            r#"
+            [[bind]]
+            glob = "*.svg"
+            mime = "image/*"
+            open = "inkscape %f"
+            "#,
+        )
+        .unwrap();
+        let c = CompiledExtBindings::from_config(&cfg);
+        assert_eq!(
+            c.lookup("logo.svg", Some("image/svg+xml"), ExtAction::Open),
+            Some("inkscape %f")
+        );
+        // glob matches but mime doesn't → no match
+        assert_eq!(
+            c.lookup("logo.svg", Some("text/plain"), ExtAction::Open),
+            None
+        );
     }
 }

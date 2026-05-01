@@ -808,6 +808,15 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             app.set_status(format!("{name}: {total} bytes"));
         }
+        PendingOp::BulkRename { parent, sources } => {
+            let _ = terminal.show_cursor();
+            if let Err(e) = run_bulk_rename(app, &parent, &sources).await {
+                tracing::warn!("bulk rename: {e}");
+                app.set_status(format!("bulk rename: {e}"));
+            }
+            let _ = terminal.clear();
+            app.refresh_active().await;
+        }
         PendingOp::ExternalPanelize { cwd, cmd } => {
             use tokio::process::Command;
             let out = match Command::new("sh")
@@ -870,6 +879,115 @@ async fn run_op<B: ratatui::backend::Backend>(
             app.set_status("panel populated by external command");
         }
     }
+}
+
+/// Open the basenames of `sources` in `$EDITOR` (one per line), parse the
+/// edited buffer, and apply the resulting renames via the appropriate Vfs.
+/// Two-phase strategy:
+///   - For lines that changed, first rename `src → src.bulkrename.tmp.<i>`
+///     (still inside `parent`) so cycles like `a↔b` can be applied without
+///     collisions.
+///   - Then rename each tmp to its final name.
+/// Errors per row are logged but don't abort the run.
+async fn run_bulk_rename(app: &mut App, parent: &VPath, sources: &[VPath]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<String> = sources
+        .iter()
+        .filter_map(|p| {
+            p.last()
+                .and_then(|l| l.sub.file_name().map(|n| n.to_string_lossy().into_owned()))
+        })
+        .collect();
+    if names.len() != sources.len() {
+        anyhow::bail!("could not derive basenames for all sources");
+    }
+
+    let mut tf = NamedTempFile::with_prefix("mc-rs-bulkrename-")?;
+    for n in &names {
+        writeln!(tf.as_file_mut(), "{n}")?;
+    }
+    tf.as_file_mut().flush()?;
+    let tmp_path = tf.path().to_path_buf();
+
+    let editor = resolve_editor(app.config.editor.command.as_deref());
+    crate::editor_spawn::spawn_editor(&editor, &tmp_path, None)?;
+
+    let edited = std::fs::read_to_string(&tmp_path)?;
+    let new_names: Vec<&str> = edited.lines().collect();
+    if new_names.len() != names.len() {
+        anyhow::bail!(
+            "line count changed ({} → {}); aborting",
+            names.len(),
+            new_names.len()
+        );
+    }
+
+    // Pair (idx, src, new) for rows that actually changed. Skip rows whose
+    // new name is empty or contains a path separator (refuse to relocate).
+    let mut changes: Vec<(usize, &VPath, String)> = Vec::new();
+    for (i, (src, new)) in sources.iter().zip(new_names.iter()).enumerate() {
+        let new = new.trim();
+        if new.is_empty() {
+            tracing::warn!("bulk rename: skipping empty target on row {i}");
+            continue;
+        }
+        if new.contains('/') || new == "." || new == ".." {
+            tracing::warn!("bulk rename: refusing path-like target {new:?} on row {i}");
+            continue;
+        }
+        if new == names[i] {
+            continue;
+        }
+        changes.push((i, src, new.to_string()));
+    }
+    if changes.is_empty() {
+        app.set_status("bulk rename: no changes");
+        return Ok(());
+    }
+
+    let vfs = app
+        .registry
+        .root_for(parent)
+        .map_err(|e| anyhow::anyhow!("no backend: {e}"))?;
+
+    // Phase 1: src → tmp
+    let mut staged: Vec<(VPath, String, &VPath)> = Vec::with_capacity(changes.len());
+    for (i, src, new) in &changes {
+        let tmp_name = format!(".mc-rs-bulkrename-{i}.tmp");
+        let Some(tmp_path) = VPath::child(parent, &tmp_name) else {
+            tracing::warn!("bulk rename: cannot build tmp vpath for row {i}");
+            continue;
+        };
+        match vfs.rename(src, &tmp_path).await {
+            Ok(()) => staged.push((tmp_path, new.clone(), src)),
+            Err(e) => tracing::warn!("bulk rename phase 1 ({src} → tmp): {e}"),
+        }
+    }
+
+    // Phase 2: tmp → final
+    let mut applied: usize = 0;
+    for (tmp_path, new_name, original_src) in staged {
+        let Some(dst) = VPath::child(parent, &new_name) else {
+            tracing::warn!("bulk rename: cannot build dst vpath for {new_name:?}");
+            // Try to put it back where it came from.
+            let _ = vfs.rename(&tmp_path, original_src).await;
+            continue;
+        };
+        match vfs.rename(&tmp_path, &dst).await {
+            Ok(()) => applied += 1,
+            Err(e) => {
+                tracing::warn!("bulk rename phase 2 (tmp → {dst}): {e}");
+                let _ = vfs.rename(&tmp_path, original_src).await;
+            }
+        }
+    }
+    app.set_status(format!("bulk rename: {applied} renamed"));
+    Ok(())
 }
 
 fn pick_src_dst(

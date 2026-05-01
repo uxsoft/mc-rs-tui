@@ -110,6 +110,7 @@ pub enum Action {
     AbsSymlink,
     RelSymlink,
     EditSymlink,
+    BulkRename,
     CompareDirs(CompareMode),
 
     // Tools
@@ -186,6 +187,7 @@ impl Action {
             Self::AbsSymlink => "ops.abs_symlink",
             Self::RelSymlink => "ops.rel_symlink",
             Self::EditSymlink => "ops.edit_symlink",
+            Self::BulkRename => "ops.bulk_rename",
             Self::CompareDirs(_) => "ops.compare_dirs",
             Self::ViewFile => "tools.view",
             Self::ViewRaw => "tools.view_raw",

@@ -15,7 +15,7 @@ use crate::dialog::{
 };
 use crate::panel::ListingMode;
 
-use super::ops::{parse_dst, parse_octal_mode, parent_path};
+use super::ops::{parent_path, parse_dst, parse_octal_mode};
 use super::{App, CopyMoveKind, Disposition, Modal, PendingOp};
 
 impl App {

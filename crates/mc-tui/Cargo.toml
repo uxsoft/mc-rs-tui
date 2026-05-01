@@ -29,6 +29,11 @@ base64 = "0.22"
 encoding_rs = "0.8"
 jwalk = "0.8"
 pathdiff = "0.2"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+tempfile = "3"
+tree_magic_mini = "3"
+ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", default-features = false, features = ["user", "fs"] }

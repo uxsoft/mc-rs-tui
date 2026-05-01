@@ -5,6 +5,8 @@ use std::path::Path;
 use mc_core::action::SortKey;
 use serde::{Deserialize, Serialize};
 
+use crate::icons::IconMode;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -37,6 +39,10 @@ pub struct OptionsConfig {
     pub confirm_overwrite: bool,
     pub confirm_exit: bool,
     pub confirm_execute: bool,
+    /// Per-row icon glyphs in panel listings. Off by default (Nerd Font required).
+    pub icons: IconMode,
+    /// Show git status indicators next to filenames inside repos. Off by default.
+    pub git_status: bool,
 }
 
 impl Default for OptionsConfig {
@@ -47,6 +53,8 @@ impl Default for OptionsConfig {
             confirm_overwrite: true,
             confirm_exit: true,
             confirm_execute: false,
+            icons: IconMode::Off,
+            git_status: false,
         }
     }
 }

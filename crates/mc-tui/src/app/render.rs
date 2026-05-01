@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::dialog::Dialog;
-use crate::panel::{panel_body_rect, render_panel};
+use crate::panel::{PanelDecor, panel_body_rect, render_panel};
 use crate::theme::rtc;
 
 use super::{App, ButtonSegment, Modal};
@@ -49,8 +49,26 @@ impl App {
         self.layout.left_body = panel_body_rect(panels[0]);
         self.layout.right_body = panel_body_rect(panels[1]);
 
-        render_panel(f, panels[0], &mut self.left, &self.highlight, &self.scheme);
-        render_panel(f, panels[1], &mut self.right, &self.highlight, &self.scheme);
+        let decor = PanelDecor {
+            icons: self.config.options.icons,
+            git_status: self.config.options.git_status,
+        };
+        render_panel(
+            f,
+            panels[0],
+            &mut self.left,
+            &self.highlight,
+            &self.scheme,
+            decor,
+        );
+        render_panel(
+            f,
+            panels[1],
+            &mut self.right,
+            &self.highlight,
+            &self.scheme,
+            decor,
+        );
         if let Some(status) = self.current_status() {
             let p = Paragraph::new(Line::from(format!(" {status} "))).style(
                 Style::default()

@@ -15,6 +15,13 @@ use crate::panel::ListingMode;
 use super::ops::{next_sort, parent_path, vpath_to_local};
 use super::{App, CopyMoveKind, Disposition, Modal, PendingOp};
 
+/// Detect MIME for a local file via libmagic-style sniffing. Returns `None`
+/// for non-local paths (caller falls back to glob-only matching).
+fn sniff_mime(target: &mc_core::VPath) -> Option<&'static str> {
+    let local = vpath_to_local(target)?;
+    Some(tree_magic_mini::from_filepath(&local).unwrap_or("application/octet-stream"))
+}
+
 impl App {
     pub(super) fn apply_select_group(&mut self, pattern: &str, select: bool) {
         let p = self.active();
@@ -244,7 +251,9 @@ impl App {
                                 return Disposition::ReloadActive;
                             }
                         }
-                        if let Some(template) = self.extbinds.lookup(&e.name, ExtAction::Open) {
+                        let mime = target.as_ref().and_then(sniff_mime);
+                        if let Some(template) = self.extbinds.lookup(&e.name, mime, ExtAction::Open)
+                        {
                             let template = template.to_string();
                             return self.run_template(&template);
                         }
@@ -472,7 +481,8 @@ impl App {
                     .cloned();
                 let target = self.active_ref().cursor_path();
                 if let (Some(e), Some(target)) = (entry, target) {
-                    if let Some(template) = self.extbinds.lookup(&e.name, ExtAction::View) {
+                    let mime = sniff_mime(&target);
+                    if let Some(template) = self.extbinds.lookup(&e.name, mime, ExtAction::View) {
                         let template = template.to_string();
                         return self.run_template(&template);
                     }
@@ -504,6 +514,16 @@ impl App {
 
             // F5 — copy: prompt for destination, then submit job.
             (KeyCode::F(5), m) if m.is_empty() => self.open_copy_move(CopyMoveKind::Copy),
+
+            // Shift-F6 — bulk rename via $EDITOR.
+            (KeyCode::F(6), m) if m == KeyMods::SHIFT => {
+                let sources = self.selected_targets();
+                if sources.is_empty() {
+                    return Disposition::None;
+                }
+                let parent = self.active_ref().cwd.clone();
+                return Disposition::RunOp(PendingOp::BulkRename { parent, sources });
+            }
 
             // F6 — single-cursored entry → rename, otherwise → move.
             (KeyCode::F(6), m) if m.is_empty() => {

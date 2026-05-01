@@ -3,3 +3,4 @@
   - icons
   - image preview using F3
   - F3 preview using cat / bat inside a dialog
+- / (slash) to trigger a search

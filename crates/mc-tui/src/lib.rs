@@ -6,6 +6,7 @@ pub mod dialog;
 pub mod diff_widget;
 pub mod editor_spawn;
 pub mod event;
+pub mod git;
 pub mod glob;
 pub mod loop_;
 pub mod panel;

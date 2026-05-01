@@ -174,6 +174,14 @@ pub enum PendingOp {
         cwd: PathBuf,
         cmd: String,
     },
+    /// Open the given source paths' filenames in `$EDITOR`, then rename
+    /// each entry whose line was edited. All sources must share `parent`
+    /// (the panel cwd at the time of submission). Two-phase rename handles
+    /// cycles like `a→b, b→a`.
+    BulkRename {
+        parent: VPath,
+        sources: Vec<VPath>,
+    },
 }
 
 #[derive(Debug)]
@@ -822,19 +830,47 @@ impl App {
         if panel.is_virtual_panelized {
             return;
         }
-        match self.registry.root_for(&panel.cwd) {
-            Ok(vfs) => match read_dir_with_parent(vfs.as_ref(), &panel.cwd).await {
+        let cwd = panel.cwd.clone();
+        match self.registry.root_for(&cwd) {
+            Ok(vfs) => match read_dir_with_parent(vfs.as_ref(), &cwd).await {
                 Ok(entries) => {
+                    let panel = if left {
+                        &mut self.left
+                    } else {
+                        &mut self.right
+                    };
                     panel.entries = entries;
                     panel.apply_filter_sort();
                 }
                 Err(e) => {
                     warn!("read_dir failed: {e}");
+                    let panel = if left {
+                        &mut self.left
+                    } else {
+                        &mut self.right
+                    };
                     panel.entries.clear();
                 }
             },
-            Err(e) => warn!("no backend for {}: {e}", panel.cwd),
+            Err(e) => warn!("no backend for {}: {e}", cwd),
         }
+        // Optional: refresh git status overlay for this panel.
+        let want_git = self.config.options.git_status;
+        let local = ops::vpath_to_local(&cwd);
+        let map = if want_git {
+            match local {
+                Some(p) => crate::git::status_for_cwd(&p).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let panel = if left {
+            &mut self.left
+        } else {
+            &mut self.right
+        };
+        panel.git_status = map;
     }
 
     pub async fn refresh_both(&mut self) {

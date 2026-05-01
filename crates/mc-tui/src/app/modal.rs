@@ -848,4 +848,3 @@ impl App {
         Disposition::Redraw
     }
 }
-

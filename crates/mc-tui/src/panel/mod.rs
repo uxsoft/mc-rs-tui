@@ -2,12 +2,14 @@
 
 pub mod sort;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use mc_config::{ColorScheme, FileHighlight};
+use mc_config::{ColorScheme, FileHighlight, IconMode, icon_for_name};
 use mc_core::action::SortKey;
 use mc_core::{Entry, EntryKind, VPath};
+
+use crate::git::GitGlyph;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -87,6 +89,10 @@ pub struct PanelState {
     /// `true` when the panel was populated by Find-and-panelize / External
     /// panelize. Suppresses the next reload from VFS.
     pub is_virtual_panelized: bool,
+    /// Top-level entry-name → git status glyph, populated on refresh when
+    /// `[options] git_status = true` and the cwd is inside a local repo.
+    /// `None` means "not in a repo / lookup disabled / failed".
+    pub git_status: Option<HashMap<String, GitGlyph>>,
 }
 
 impl PanelState {
@@ -111,6 +117,7 @@ impl PanelState {
             sizes_computed: false,
             computed_dir_sizes: HashSet::new(),
             is_virtual_panelized: false,
+            git_status: None,
         }
     }
 
@@ -232,12 +239,20 @@ pub fn panel_body_rect(area: Rect) -> Rect {
         .split(inner)[0]
 }
 
+/// Decorations toggled by user options that affect per-row rendering.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PanelDecor {
+    pub icons: IconMode,
+    pub git_status: bool,
+}
+
 pub fn render_panel(
     f: &mut Frame<'_>,
     area: Rect,
     state: &mut PanelState,
     highlight: &FileHighlight,
     scheme: &ColorScheme,
+    decor: PanelDecor,
 ) {
     let bg = rtc(scheme.panel_bg);
     let fg = rtc(scheme.panel_fg);
@@ -295,6 +310,7 @@ pub fn render_panel(
         }
     }
 
+    let git_status = state.git_status.as_ref();
     let lines = if matches!(state.mode, ListingMode::Tree) {
         render_tree(state, height, bg, fg, cursor_bg, cursor_fg)
     } else {
@@ -308,6 +324,8 @@ pub fn render_panel(
             cursor_bg,
             cursor_fg,
             marked_fg,
+            decor,
+            git_status,
         )
     };
     let para = Paragraph::new(lines).style(Style::default().bg(bg));
@@ -321,7 +339,11 @@ pub fn render_panel(
             String::from("(empty tree)")
         }
     } else if let Some(e) = state.entries.get(state.cursor) {
-        format!("{:>10}  {}", size_cell(e, &state.computed_dir_sizes), e.name)
+        format!(
+            "{:>10}  {}",
+            size_cell(e, &state.computed_dir_sizes),
+            e.name
+        )
     } else {
         String::from("(empty)")
     };
@@ -341,6 +363,8 @@ fn render_entries(
     cursor_bg: Color,
     cursor_fg: Color,
     marked_fg: Color,
+    decor: PanelDecor,
+    git_status: Option<&HashMap<String, GitGlyph>>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(height);
     let end = (state.view_offset + height).min(state.entries.len());
@@ -361,6 +385,8 @@ fn render_entries(
             cursor_fg,
             marked_fg,
             &state.computed_dir_sizes,
+            decor,
+            git_status,
         ));
     }
     lines
@@ -380,6 +406,8 @@ fn format_line(
     cursor_fg: Color,
     marked_fg: Color,
     computed_sizes: &HashSet<String>,
+    decor: PanelDecor,
+    git_status: Option<&HashMap<String, GitGlyph>>,
 ) -> Line<'static> {
     let mut style = entry_style(e, highlight, scheme, bg);
     if is_marked {
@@ -388,23 +416,48 @@ fn format_line(
     if is_cursor {
         style = style.bg(cursor_bg).fg(cursor_fg);
     }
+    // Git status glyph (2 cols: glyph + space). Empty when no map or no entry.
+    let git_prefix: String = if decor.git_status && e.name != ".." {
+        match git_status.and_then(|m| m.get(&e.name)) {
+            Some(g) => format!("{} ", g.as_str()),
+            None => "  ".into(),
+        }
+    } else {
+        String::new()
+    };
+    let git_cols = if git_prefix.is_empty() { 0 } else { 2 };
+    // Icon prefix (2 cols: glyph + space) only when configured. Skipped for
+    // `..` so the parent-up entry stays visually distinct.
+    let icon_prefix: String = if decor.icons.enabled() && e.name != ".." {
+        format!("{} ", icon_for_name(&e.name, e.kind))
+    } else {
+        String::new()
+    };
+    let icon_cols = if icon_prefix.is_empty() { 0 } else { 2 };
+    let prefix_cols = git_cols + icon_cols;
     let text = match mode {
-        ListingMode::Brief | ListingMode::Tree => e.name.clone(),
-        ListingMode::Full => format!(
-            "{:<name$} {:>10}",
-            e.name,
-            size_cell(e, computed_sizes),
-            name = width.saturating_sub(13)
-        ),
+        ListingMode::Brief | ListingMode::Tree => {
+            format!("{git_prefix}{icon_prefix}{}", e.name)
+        }
+        ListingMode::Full => {
+            let name_w = width.saturating_sub(13).saturating_sub(prefix_cols);
+            format!(
+                "{git_prefix}{icon_prefix}{:<name$} {:>10}",
+                e.name,
+                size_cell(e, computed_sizes),
+                name = name_w
+            )
+        }
         ListingMode::Long => {
             let mode_str = unix_mode_str(e);
+            let name_w = width.saturating_sub(28).saturating_sub(prefix_cols);
             format!(
-                "{} {:>4} {:>10} {:<name$}",
+                "{} {:>4} {:>10} {git_prefix}{icon_prefix}{:<name$}",
                 mode_str,
                 e.nlink.unwrap_or(0),
                 size_cell(e, computed_sizes),
                 e.name,
-                name = width.saturating_sub(28),
+                name = name_w,
             )
         }
     };
@@ -499,10 +552,10 @@ fn unix_mode_str(e: &Entry) -> String {
 
 fn size_cell(e: &Entry, computed: &HashSet<String>) -> String {
     if e.name == ".." {
-        return "UP--DIR".into();
+        return "UP".into();
     }
     if matches!(e.kind, EntryKind::Dir) && !computed.contains(&e.name) {
-        return "<DIR>".into();
+        return "DIR".into();
     }
     human_size(e.size)
 }
