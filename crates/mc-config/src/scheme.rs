@@ -4,7 +4,7 @@
 //! [`crate::skin::SkinFile::resolve`], which picks a base theme by name and
 //! applies any per-field overrides from the user's `skin.toml`.
 
-use crate::skin::{parse_color, ThemeColor};
+use crate::skin::{ThemeColor, parse_color};
 
 /// Concrete, fully-resolved palette referenced by every renderer.
 ///
@@ -92,21 +92,21 @@ impl ColorScheme {
     #[must_use]
     pub fn modern_dark() -> Self {
         // base palette
-        let base   = ThemeColor::rgb(0x1e, 0x1e, 0x2e); // panel bg
+        let base = ThemeColor::rgb(0x1e, 0x1e, 0x2e); // panel bg
         let mantle = ThemeColor::rgb(0x18, 0x18, 0x25); // statusbar bg
         let surface0 = ThemeColor::rgb(0x31, 0x32, 0x44); // dialog bg
         let surface1 = ThemeColor::rgb(0x45, 0x47, 0x5a); // muted/border
         let surface2 = ThemeColor::rgb(0x58, 0x5b, 0x70);
-        let text   = ThemeColor::rgb(0xcd, 0xd6, 0xf4); // primary fg
+        let text = ThemeColor::rgb(0xcd, 0xd6, 0xf4); // primary fg
         let subtext = ThemeColor::rgb(0xba, 0xc2, 0xde);
-        let blue   = ThemeColor::rgb(0x89, 0xb4, 0xfa);
-        let teal   = ThemeColor::rgb(0x94, 0xe2, 0xd5);
-        let green  = ThemeColor::rgb(0xa6, 0xe3, 0xa1);
+        let blue = ThemeColor::rgb(0x89, 0xb4, 0xfa);
+        let teal = ThemeColor::rgb(0x94, 0xe2, 0xd5);
+        let green = ThemeColor::rgb(0xa6, 0xe3, 0xa1);
         let yellow = ThemeColor::rgb(0xf9, 0xe2, 0xaf);
-        let peach  = ThemeColor::rgb(0xfa, 0xb3, 0x87);
-        let mauve  = ThemeColor::rgb(0xcb, 0xa6, 0xf7);
-        let pink   = ThemeColor::rgb(0xf5, 0xc2, 0xe7);
-        let red    = ThemeColor::rgb(0xf3, 0x8b, 0xa8);
+        let peach = ThemeColor::rgb(0xfa, 0xb3, 0x87);
+        let mauve = ThemeColor::rgb(0xcb, 0xa6, 0xf7);
+        let pink = ThemeColor::rgb(0xf5, 0xc2, 0xe7);
+        let red = ThemeColor::rgb(0xf3, 0x8b, 0xa8);
 
         Self {
             panel_bg: base,
@@ -170,21 +170,21 @@ impl ColorScheme {
     /// Tokyo Night — cooler, deeper bluish dark theme.
     #[must_use]
     pub fn tokyo_night() -> Self {
-        let bg      = ThemeColor::rgb(0x1a, 0x1b, 0x26);
+        let bg = ThemeColor::rgb(0x1a, 0x1b, 0x26);
         let bg_dark = ThemeColor::rgb(0x16, 0x16, 0x1e);
-        let bg_hl   = ThemeColor::rgb(0x29, 0x2e, 0x42);
+        let bg_hl = ThemeColor::rgb(0x29, 0x2e, 0x42);
         let surface = ThemeColor::rgb(0x24, 0x28, 0x3b);
-        let muted   = ThemeColor::rgb(0x54, 0x5c, 0x7e);
-        let fg      = ThemeColor::rgb(0xc0, 0xca, 0xf5);
-        let fg_dim  = ThemeColor::rgb(0xa9, 0xb1, 0xd6);
-        let blue    = ThemeColor::rgb(0x7a, 0xa2, 0xf7);
-        let cyan    = ThemeColor::rgb(0x7d, 0xcf, 0xff);
-        let teal    = ThemeColor::rgb(0x73, 0xda, 0xca);
-        let green   = ThemeColor::rgb(0x9e, 0xce, 0x6a);
-        let yellow  = ThemeColor::rgb(0xe0, 0xaf, 0x68);
-        let orange  = ThemeColor::rgb(0xff, 0x9e, 0x64);
+        let muted = ThemeColor::rgb(0x54, 0x5c, 0x7e);
+        let fg = ThemeColor::rgb(0xc0, 0xca, 0xf5);
+        let fg_dim = ThemeColor::rgb(0xa9, 0xb1, 0xd6);
+        let blue = ThemeColor::rgb(0x7a, 0xa2, 0xf7);
+        let cyan = ThemeColor::rgb(0x7d, 0xcf, 0xff);
+        let teal = ThemeColor::rgb(0x73, 0xda, 0xca);
+        let green = ThemeColor::rgb(0x9e, 0xce, 0x6a);
+        let yellow = ThemeColor::rgb(0xe0, 0xaf, 0x68);
+        let orange = ThemeColor::rgb(0xff, 0x9e, 0x64);
         let magenta = ThemeColor::rgb(0xbb, 0x9a, 0xf7);
-        let red     = ThemeColor::rgb(0xf7, 0x76, 0x8e);
+        let red = ThemeColor::rgb(0xf7, 0x76, 0x8e);
 
         Self {
             panel_bg: bg,
@@ -251,20 +251,17 @@ impl ColorScheme {
         let base3 = ThemeColor::rgb(0xfd, 0xf6, 0xe3); // panel bg
         let base2 = ThemeColor::rgb(0xee, 0xe8, 0xd5); // dialog bg / selection
         let base1 = ThemeColor::rgb(0x93, 0xa1, 0xa1); // muted
-        let base0 = ThemeColor::rgb(0x83, 0x94, 0x96);
         let base00 = ThemeColor::rgb(0x65, 0x7b, 0x83); // dim text
-        let base01 = ThemeColor::rgb(0x58, 0x6e, 0x75);
         let base02 = ThemeColor::rgb(0x07, 0x36, 0x42); // primary text
         let base03 = ThemeColor::rgb(0x00, 0x2b, 0x36); // strong text
         let yellow = ThemeColor::rgb(0xb5, 0x89, 0x00);
         let orange = ThemeColor::rgb(0xcb, 0x4b, 0x16);
-        let red    = ThemeColor::rgb(0xdc, 0x32, 0x2f);
+        let red = ThemeColor::rgb(0xdc, 0x32, 0x2f);
         let magenta = ThemeColor::rgb(0xd3, 0x36, 0x82);
         let violet = ThemeColor::rgb(0x6c, 0x71, 0xc4);
-        let blue   = ThemeColor::rgb(0x26, 0x8b, 0xd2);
-        let cyan   = ThemeColor::rgb(0x2a, 0xa1, 0x98);
-        let green  = ThemeColor::rgb(0x85, 0x99, 0x00);
-        let _ = (base0, base01); // reserved for future fields
+        let blue = ThemeColor::rgb(0x26, 0x8b, 0xd2);
+        let cyan = ThemeColor::rgb(0x2a, 0xa1, 0x98);
+        let green = ThemeColor::rgb(0x85, 0x99, 0x00);
 
         Self {
             panel_bg: base3,
@@ -342,19 +339,54 @@ pub fn apply_override(scheme: &mut ColorScheme, key: &str, value: &str) -> Resul
         };
     }
     fields!(
-        panel_bg, panel_fg, panel_dim_fg,
-        panel_border, panel_border_active,
-        panel_title_fg, panel_title_active_bg, panel_title_active_fg,
-        cursor_bg, cursor_fg, marked_fg,
-        file_dir, file_symlink, file_executable, file_device, file_special,
-        file_archive, file_image, file_media, file_doc, file_source, file_build,
-        dialog_bg, dialog_fg, dialog_border, dialog_title_fg,
-        dialog_focus_bg, dialog_focus_fg, input_bg, input_fg,
-        danger_bg, danger_fg, danger_focus_bg, danger_focus_fg,
-        statusbar_bg, statusbar_fg,
-        buttonbar_bg, buttonbar_fg, buttonbar_label_bg, buttonbar_label_fg,
-        search_bg, search_fg, op_status_bg, op_status_fg,
-        diff_add_bg, diff_add_fg, diff_del_bg, diff_del_fg,
+        panel_bg,
+        panel_fg,
+        panel_dim_fg,
+        panel_border,
+        panel_border_active,
+        panel_title_fg,
+        panel_title_active_bg,
+        panel_title_active_fg,
+        cursor_bg,
+        cursor_fg,
+        marked_fg,
+        file_dir,
+        file_symlink,
+        file_executable,
+        file_device,
+        file_special,
+        file_archive,
+        file_image,
+        file_media,
+        file_doc,
+        file_source,
+        file_build,
+        dialog_bg,
+        dialog_fg,
+        dialog_border,
+        dialog_title_fg,
+        dialog_focus_bg,
+        dialog_focus_fg,
+        input_bg,
+        input_fg,
+        danger_bg,
+        danger_fg,
+        danger_focus_bg,
+        danger_focus_fg,
+        statusbar_bg,
+        statusbar_fg,
+        buttonbar_bg,
+        buttonbar_fg,
+        buttonbar_label_bg,
+        buttonbar_label_fg,
+        search_bg,
+        search_fg,
+        op_status_bg,
+        op_status_fg,
+        diff_add_bg,
+        diff_add_fg,
+        diff_del_bg,
+        diff_del_fg,
         muted_fg,
     )
 }

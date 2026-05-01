@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use mc_core::{Entry, EntryKind, Error, Result, VPath};
 use mc_vfs::trait_::{AsyncReader, Capabilities, Vfs};
 
+use crate::safe_archive_key;
 use crate::tar_vfs::AsyncSliceReader;
 
 #[derive(Debug, Clone)]
@@ -42,7 +43,15 @@ impl CpioVfs {
                 Some(h) => h,
                 None => break,
             };
-            let name = normalize_key(hdr.name());
+            let raw_name = hdr.name().to_string();
+            let Some(name) = safe_archive_key(&raw_name) else {
+                tracing::warn!("cpio: skipping traversal entry {raw_name:?}");
+                // Drain the data record so the reader stays aligned.
+                let size = hdr.file_size();
+                let mut sink = std::io::sink();
+                let _ = std::io::copy(&mut Read::take(&mut reader, size), &mut sink);
+                continue;
+            };
             if name == "/" {
                 // Skip "TRAILER!!!" or empty-name records.
                 continue;
@@ -53,8 +62,11 @@ impl CpioVfs {
             let mtime = std::time::UNIX_EPOCH
                 .checked_add(std::time::Duration::from_secs(u64::from(hdr.mtime())));
             let data = if matches!(kind, EntryKind::File) && size > 0 {
-                let mut buf = Vec::with_capacity(size as usize);
-                Read::take(&mut reader, size).read_to_end(&mut buf).map_err(Error::Io)?;
+                let cap = size.min(crate::MAX_DECOMPRESSED) as usize;
+                let mut buf = Vec::with_capacity(cap);
+                Read::take(&mut reader, size)
+                    .read_to_end(&mut buf)
+                    .map_err(Error::Io)?;
                 Some(Arc::<[u8]>::from(buf))
             } else {
                 None
@@ -90,24 +102,13 @@ impl CpioVfs {
             .rev()
             .find(|l| l.scheme == self.scheme)
             .ok_or_else(|| Error::InvalidPath(format!("vpath has no {} layer", self.scheme)))?;
-        Ok(normalize_key(&layer.sub.to_string_lossy()))
+        safe_archive_key(&layer.sub.to_string_lossy())
+            .ok_or_else(|| Error::InvalidPath(format!("path traversal in {p}")))
     }
 }
 
 fn cpio_err(e: cpio_archive::Error) -> Error {
     Error::Vfs(format!("cpio: {e}"))
-}
-
-fn normalize_key(s: &str) -> String {
-    let trimmed = s.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return "/".to_string();
-    }
-    if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    }
 }
 
 fn kind_from_mode(mode_full: u32) -> EntryKind {

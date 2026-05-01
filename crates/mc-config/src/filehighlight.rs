@@ -17,6 +17,8 @@
 //! extensions = ["rs", "c", "h", "cpp", "py", "go", "ts", "js"]
 //! ```
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,20 +40,41 @@ impl FileHighlight {
     #[must_use]
     pub fn defaults() -> Self {
         let rules = [
-            ("archive", &[
-                "tar", "gz", "tgz", "zip", "bz2", "tbz", "tbz2", "xz", "txz", "7z", "rar", "zst", "tzst", "lz", "lzma",
-            ][..]),
-            ("image", &[
-                "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff",
-            ][..]),
+            (
+                "archive",
+                &[
+                    "tar", "gz", "tgz", "zip", "bz2", "tbz", "tbz2", "xz", "txz", "7z", "rar",
+                    "zst", "tzst", "lz", "lzma",
+                ][..],
+            ),
+            (
+                "image",
+                &[
+                    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff",
+                ][..],
+            ),
             ("audio", &["mp3", "ogg", "flac", "wav", "m4a", "opus"][..]),
-            ("video", &["mp4", "mkv", "webm", "mov", "avi", "mpg", "mpeg"][..]),
-            ("doc", &["pdf", "epub", "djvu", "doc", "docx", "odt", "rtf", "md", "txt"][..]),
-            ("source", &[
-                "rs", "c", "h", "cpp", "cc", "cxx", "hpp", "py", "go", "ts", "tsx", "js", "jsx",
-                "java", "kt", "scala", "rb", "swift", "lua", "sh", "fish", "zsh", "ps1",
-            ][..]),
-            ("build", &["toml", "yaml", "yml", "json", "lock", "ini", "conf", "cfg"][..]),
+            (
+                "video",
+                &["mp4", "mkv", "webm", "mov", "avi", "mpg", "mpeg"][..],
+            ),
+            (
+                "doc",
+                &[
+                    "pdf", "epub", "djvu", "doc", "docx", "odt", "rtf", "md", "txt",
+                ][..],
+            ),
+            (
+                "source",
+                &[
+                    "rs", "c", "h", "cpp", "cc", "cxx", "hpp", "py", "go", "ts", "tsx", "js",
+                    "jsx", "java", "kt", "scala", "rb", "swift", "lua", "sh", "fish", "zsh", "ps1",
+                ][..],
+            ),
+            (
+                "build",
+                &["toml", "yaml", "yml", "json", "lock", "ini", "conf", "cfg"][..],
+            ),
         ];
         Self {
             rule: rules
@@ -79,6 +102,17 @@ impl FileHighlight {
 
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
+    }
+
+    /// Load from `path`. Missing file → bundled [`Self::defaults`].
+    /// Malformed file → `InvalidData` so the caller can log the error.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Self::from_toml(&s)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::defaults()),
+            Err(e) => Err(e),
+        }
     }
 }
 

@@ -12,11 +12,15 @@ pub struct ConfigPaths {
 impl ConfigPaths {
     /// Resolve from XDG variables, falling back to `$HOME/.config/mc-rs` etc.
     /// `$MC_RS_CONFIG_DIR` overrides the config dir.
+    ///
+    /// If `$HOME` is unset (only realistic in odd cron / system-service
+    /// environments), we fall back to the system temp dir so a stray run
+    /// doesn't litter the cwd with `.config/mc-rs/...`.
     #[must_use]
     pub fn discover() -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .unwrap_or_else(std::env::temp_dir);
 
         let config_dir = std::env::var_os("MC_RS_CONFIG_DIR")
             .map(PathBuf::from)

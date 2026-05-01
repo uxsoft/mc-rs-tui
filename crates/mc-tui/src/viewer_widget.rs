@@ -8,11 +8,11 @@ use std::path::Path;
 
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use crate::theme::rtc;
 
@@ -91,14 +91,8 @@ impl ViewerWidget {
     }
 
     fn cycle_encoding(&mut self) {
-        let cur = self
-            .encoding
-            .name()
-            .to_string();
-        let idx = ENCODINGS
-            .iter()
-            .position(|e| e.name() == cur)
-            .unwrap_or(0);
+        let cur = self.encoding.name().to_string();
+        let idx = ENCODINGS.iter().position(|e| e.name() == cur).unwrap_or(0);
         let next = (idx + 1) % ENCODINGS.len();
         self.encoding = ENCODINGS[next];
         self.text_lines = decode_lines(&self.bytes, self.encoding);
@@ -134,7 +128,11 @@ impl ViewerWidget {
         match chord.code {
             KeyCode::Escape | KeyCode::F(10) | KeyCode::Char('q') => return false,
             KeyCode::F(4) => {
-                self.mode = if self.mode == ViewerMode::Text { ViewerMode::Hex } else { ViewerMode::Text };
+                self.mode = if self.mode == ViewerMode::Text {
+                    ViewerMode::Hex
+                } else {
+                    ViewerMode::Text
+                };
             }
             KeyCode::Down | KeyCode::Char('j') => self.offset += 1,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -190,10 +188,18 @@ impl ViewerWidget {
 
     pub fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         f.render_widget(Clear, area);
-        let panel = Style::default().fg(rtc(scheme.panel_fg)).bg(rtc(scheme.panel_bg));
-        let bar_btn = Style::default().fg(rtc(scheme.buttonbar_fg)).bg(rtc(scheme.buttonbar_bg));
-        let bar_lbl = Style::default().fg(rtc(scheme.buttonbar_label_fg)).bg(rtc(scheme.buttonbar_label_bg));
-        let search = Style::default().fg(rtc(scheme.search_fg)).bg(rtc(scheme.search_bg));
+        let panel = Style::default()
+            .fg(rtc(scheme.panel_fg))
+            .bg(rtc(scheme.panel_bg));
+        let bar_btn = Style::default()
+            .fg(rtc(scheme.buttonbar_fg))
+            .bg(rtc(scheme.buttonbar_bg));
+        let bar_lbl = Style::default()
+            .fg(rtc(scheme.buttonbar_label_fg))
+            .bg(rtc(scheme.buttonbar_label_bg));
+        let search = Style::default()
+            .fg(rtc(scheme.search_fg))
+            .bg(rtc(scheme.search_bg));
 
         let mode_label = match self.mode {
             ViewerMode::Text => "TEXT",
@@ -205,10 +211,16 @@ impl ViewerWidget {
         let block = Block::default()
             .title(Span::styled(
                 title,
-                Style::default().fg(rtc(scheme.panel_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.panel_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.panel_border)).bg(rtc(scheme.panel_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.panel_border))
+                    .bg(rtc(scheme.panel_bg)),
+            )
             .style(panel);
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -234,7 +246,13 @@ impl ViewerWidget {
             } else {
                 Line::from(vec![
                     Span::styled("found ", bar_btn),
-                    Span::styled(state.pattern.clone(), Style::default().fg(rtc(scheme.search_bg)).bg(rtc(scheme.statusbar_bg)).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        state.pattern.clone(),
+                        Style::default()
+                            .fg(rtc(scheme.search_bg))
+                            .bg(rtc(scheme.statusbar_bg))
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw("    n: next   N: prev   /: new search   q: close"),
                 ])
             }
@@ -280,7 +298,11 @@ impl ViewerWidget {
             }
             s.push(' ');
             for &b in chunk {
-                let c = if (0x20..=0x7e).contains(&b) { b as char } else { '.' };
+                let c = if (0x20..=0x7e).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                };
                 s.push(c);
             }
             out.push(Line::from(s));

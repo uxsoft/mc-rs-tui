@@ -8,11 +8,11 @@ use std::path::PathBuf;
 use mc_config::{ColorScheme, FileHighlight};
 use mc_core::action::SortKey;
 use mc_core::{Entry, EntryKind, VPath};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::theme::rtc;
 use sort::sort_entries;
@@ -110,7 +110,8 @@ impl PanelState {
 
     pub fn apply_filter_sort(&mut self) {
         if !self.show_hidden {
-            self.entries.retain(|e| !e.name.starts_with('.') || e.name == "..");
+            self.entries
+                .retain(|e| !e.name.starts_with('.') || e.name == "..");
         }
         if let Some(g) = self.filter.as_deref() {
             if !g.is_empty() {
@@ -163,7 +164,9 @@ impl PanelState {
     }
 
     pub fn toggle_mark(&mut self) {
-        let Some(e) = self.entries.get(self.cursor) else { return };
+        let Some(e) = self.entries.get(self.cursor) else {
+            return;
+        };
         if e.name == ".." {
             return;
         }
@@ -322,17 +325,8 @@ fn render_entries(
         let is_cursor = i == state.cursor && state.active;
         let is_marked = state.marks.contains(&e.name);
         lines.push(format_line(
-            e,
-            state.mode,
-            width,
-            is_cursor,
-            is_marked,
-            highlight,
-            scheme,
-            bg,
-            cursor_bg,
-            cursor_fg,
-            marked_fg,
+            e, state.mode, width, is_cursor, is_marked, highlight, scheme, bg, cursor_bg,
+            cursor_fg, marked_fg,
         ));
     }
     lines
@@ -361,7 +355,12 @@ fn format_line(
     }
     let text = match mode {
         ListingMode::Brief | ListingMode::Tree => e.name.clone(),
-        ListingMode::Full => format!("{:<name$} {:>10}", e.name, human_size(e.size), name = width.saturating_sub(13)),
+        ListingMode::Full => format!(
+            "{:<name$} {:>10}",
+            e.name,
+            human_size(e.size),
+            name = width.saturating_sub(13)
+        ),
         ListingMode::Long => {
             let mode_str = unix_mode_str(e);
             format!(

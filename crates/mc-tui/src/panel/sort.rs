@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
-use mc_core::action::SortKey;
 use mc_core::Entry;
+use mc_core::action::SortKey;
 
 pub fn sort_entries(entries: &mut [Entry], key: SortKey, reverse: bool, mix_dirs: bool) {
     entries.sort_by(|a, b| {

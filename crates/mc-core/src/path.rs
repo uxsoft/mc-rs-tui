@@ -67,6 +67,28 @@ impl VPath {
     pub fn pop_layer(&mut self) -> Option<Layer> {
         self.layers.pop()
     }
+
+    /// Append a single path component to the last layer's `sub`. Returns
+    /// `None` if `self` has no layers, or if `name` is not a single safe
+    /// component (`/`, `\`, `.`, `..`, or empty are all rejected so a
+    /// caller-supplied filename cannot escape the parent directory).
+    #[must_use]
+    pub fn child(&self, name: &str) -> Option<Self> {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\')
+        {
+            return None;
+        }
+        let mut last = self.last()?.clone();
+        last.sub.push(name);
+        let mut new = self.clone();
+        new.pop_layer();
+        new.push_layer(last);
+        Some(new)
+    }
 }
 
 impl fmt::Display for VPath {
@@ -78,7 +100,13 @@ impl fmt::Display for VPath {
             if layer.location.is_empty() {
                 write!(f, "{}:{}", layer.scheme, layer.sub.display())?;
             } else {
-                write!(f, "{}://{}{}", layer.scheme, layer.location, layer.sub.display())?;
+                write!(
+                    f,
+                    "{}://{}{}",
+                    layer.scheme,
+                    layer.location,
+                    layer.sub.display()
+                )?;
             }
         }
         Ok(())
@@ -173,5 +201,22 @@ mod tests {
     fn rejects_empty() {
         assert!("".parse::<VPath>().is_err());
         assert!(":x".parse::<VPath>().is_err());
+    }
+
+    #[test]
+    fn child_appends_safely() {
+        let p = VPath::local("/a/b");
+        let c = p.child("c").unwrap();
+        assert_eq!(c.last().unwrap().sub.to_str().unwrap(), "/a/b/c");
+    }
+
+    #[test]
+    fn child_rejects_separators() {
+        let p = VPath::local("/a");
+        assert!(p.child("").is_none());
+        assert!(p.child(".").is_none());
+        assert!(p.child("..").is_none());
+        assert!(p.child("a/b").is_none());
+        assert!(p.child("a\\b").is_none());
     }
 }

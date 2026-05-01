@@ -10,11 +10,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,12 +48,11 @@ pub fn drop_to_shell_with_sync(cwd: &Path) -> Result<Option<PathBuf>> {
     let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let kind = ShellKind::from_path(&shell_path);
 
-    // Per-process tempfile path for the cwd dump.
-    let pwd_file = std::env::temp_dir().join(format!(
-        "mc-rs-pwd-{}.txt",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&pwd_file);
+    // Per-invocation tempfile for the cwd dump. Created with `O_EXCL` and an
+    // unguessable suffix so a co-tenant on a shared `/tmp` cannot pre-place a
+    // symlink at the path and trick the user's own shell into clobbering an
+    // arbitrary file when it runs `pwd > $file`.
+    let pwd_file = create_pwd_tempfile()?;
 
     // Build a per-shell hook file that sources the user's startup, then sets
     // an EXIT trap (or fish equivalent) that writes $PWD into our tempfile.
@@ -85,9 +86,7 @@ pub fn drop_to_shell_with_sync(cwd: &Path) -> Result<Option<PathBuf>> {
     execute!(io::stdout(), LeaveAlternateScreen).context("leave alt-screen")?;
     disable_raw_mode().context("disable raw mode")?;
 
-    eprintln!(
-        "[mc-rs] drop to {shell_path} (Ctrl-D / exit returns to mc-rs; cwd will sync)"
-    );
+    eprintln!("[mc-rs] drop to {shell_path} (Ctrl-D / exit returns to mc-rs; cwd will sync)");
 
     // Build the command. For bash we use `--rcfile` to inject the hook; for
     // zsh we set $ZDOTDIR to a directory containing only our `.zshrc`; for
@@ -130,13 +129,43 @@ pub fn drop_to_shell_with_sync(cwd: &Path) -> Result<Option<PathBuf>> {
     Ok(new_cwd)
 }
 
+/// Create a fresh, owner-only file in `$TMPDIR` to receive the shell's `pwd`.
+/// Uses `O_EXCL` so this fails (rather than overwriting) if the path already
+/// exists — defeating symlink-pre-placement attacks against a predictable name.
+fn create_pwd_tempfile() -> io::Result<PathBuf> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let pid = std::process::id();
+    // Try a handful of times in case of an extremely unlucky collision.
+    let mut last_err: Option<io::Error> = None;
+    for attempt in 0..16 {
+        let path = std::env::temp_dir().join(format!(
+            "mc-rs-pwd-{pid}-{nanos:08x}-{n:04x}-{attempt:02x}.txt",
+        ));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::other("could not create subshell tempfile")))
+}
+
 fn write_hook(name: &str, body: &str) -> io::Result<PathBuf> {
     // Each invocation gets a fresh tempdir to keep ZDOTDIR clean.
-    let dir = std::env::temp_dir().join(format!(
-        "mc-rs-shell-{}-{}",
-        std::process::id(),
-        name
-    ));
+    let dir = std::env::temp_dir().join(format!("mc-rs-shell-{}-{}", std::process::id(), name));
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(match name {
         "zshrc" => ".zshrc",
@@ -147,7 +176,9 @@ fn write_hook(name: &str, body: &str) -> io::Result<PathBuf> {
 }
 
 fn shell_quote(s: &str) -> String {
-    if s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/')) {
+    if s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
+    {
         return s.to_string();
     }
     let mut out = String::with_capacity(s.len() + 4);

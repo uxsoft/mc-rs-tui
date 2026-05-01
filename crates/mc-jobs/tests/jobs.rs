@@ -56,10 +56,7 @@ async fn copy_recursive_local() {
     assert!(dst.path().join("a/x.txt").exists());
     assert!(dst.path().join("a/b/y.bin").exists());
     assert!(dst.path().join("top.txt").exists());
-    assert_eq!(
-        std::fs::read(dst.path().join("a/x.txt")).unwrap(),
-        b"hello"
-    );
+    assert_eq!(std::fs::read(dst.path().join("a/x.txt")).unwrap(), b"hello");
 }
 
 #[tokio::test]
@@ -88,7 +85,11 @@ async fn copy_cancel_stops_early() {
     let dst = TempDir::new().unwrap();
     // Make a moderate tree so we have time to cancel.
     for i in 0..50 {
-        std::fs::write(src.path().join(format!("f{i:03}.bin")), vec![0u8; 16 * 1024]).unwrap();
+        std::fs::write(
+            src.path().join(format!("f{i:03}.bin")),
+            vec![0u8; 16 * 1024],
+        )
+        .unwrap();
     }
     let vfs = LocalVfs::shared();
     let sources: Vec<VPath> = (0..50)

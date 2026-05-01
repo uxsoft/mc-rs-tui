@@ -2,13 +2,13 @@
 
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 pub struct HelpDialog {
@@ -38,14 +38,22 @@ impl Dialog for HelpDialog {
     fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(76, 24, area);
         f.render_widget(Clear, rect);
-        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
+        let dlg = Style::default()
+            .fg(rtc(scheme.dialog_fg))
+            .bg(rtc(scheme.dialog_bg));
         let block = Block::default()
             .title(Span::styled(
                 " Help — keybindings ",
-                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.dialog_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_border))
+                    .bg(rtc(scheme.dialog_bg)),
+            )
             .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
@@ -66,7 +74,9 @@ impl Dialog for HelpDialog {
         f.render_widget(Paragraph::new(visible).style(dlg), body);
         f.render_widget(
             Paragraph::new(Line::from("PgUp/PgDn or j/k: scroll    Esc/F10/q: close")).style(
-                Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg)),
+                Style::default()
+                    .fg(rtc(scheme.panel_dim_fg))
+                    .bg(rtc(scheme.dialog_bg)),
             ),
             hint,
         );
@@ -154,9 +164,17 @@ fn build_help_lines() -> Vec<Line<'static>> {
     row(&mut out, "Insert", "tag / untag entry");
     row(&mut out, "+", "select group (glob, e.g. *.txt)");
     row(&mut out, "\\", "unselect group");
-    row(&mut out, "Alt-Y / Alt-U", "directory history back / forward");
+    row(
+        &mut out,
+        "Alt-Y / Alt-U",
+        "directory history back / forward",
+    );
     row(&mut out, "Alt-I", "mirror cwd into other panel");
-    row(&mut out, "Alt-O", "load other panel with selected/parent dir");
+    row(
+        &mut out,
+        "Alt-O",
+        "load other panel with selected/parent dir",
+    );
     row(&mut out, "Ctrl-./Alt-.", "toggle hidden files");
 
     section(&mut out, "Sort & listing");
@@ -173,12 +191,20 @@ fn build_help_lines() -> Vec<Line<'static>> {
     row(&mut out, "Ctrl-X C", "chmod (octal)");
     row(&mut out, "Ctrl-X H", "add cwd to hotlist");
     row(&mut out, "Ctrl-X D", "diff cursor file vs other panel");
-    row(&mut out, "Ctrl-X =", "compare directories (mark differing files)");
+    row(
+        &mut out,
+        "Ctrl-X =",
+        "compare directories (mark differing files)",
+    );
     row(&mut out, "Ctrl-X P", "copy active cwd to clipboard");
     row(&mut out, "Ctrl-X T", "copy cursor path to clipboard");
     row(&mut out, "Ctrl-K", "learn keys (terminal calibration)");
     row(&mut out, "Ctrl-J", "background jobs view");
-    row(&mut out, "Ctrl-O", "drop to shell ($SHELL); exit/Ctrl-D returns");
+    row(
+        &mut out,
+        "Ctrl-O",
+        "drop to shell ($SHELL); exit/Ctrl-D returns",
+    );
 
     section(&mut out, "Inside viewer (F3)");
     row(&mut out, "F4", "toggle text / hex mode");

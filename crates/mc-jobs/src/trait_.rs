@@ -31,7 +31,9 @@ pub struct JobUpdate {
 
 #[derive(Debug, Clone)]
 pub enum JobUpdateKind {
-    Started { description: String },
+    Started {
+        description: String,
+    },
     Progress(Progress),
     /// User-readable status (e.g., "copying foo.txt").
     Status(String),

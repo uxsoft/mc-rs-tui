@@ -10,8 +10,8 @@ pub mod theme;
 
 pub use action::Action;
 pub use entry::{Entry, EntryKind};
-pub use macros::{shell_quote, substitute, MacroCtx};
 pub use error::{Error, Result};
 pub use key::{KeyChord, KeyMods, KeySequence};
+pub use macros::{MacroCtx, shell_quote, substitute};
 pub use path::{Layer, VPath, VPathBuf};
 pub use theme::{Element, Style, Theme};

@@ -15,6 +15,8 @@ use mc_core::{Entry, EntryKind, Error, Result, VPath};
 use mc_vfs::trait_::{AsyncReader, Capabilities, Vfs};
 use tokio::io::AsyncRead;
 
+use crate::{decompress_capped, safe_archive_key};
+
 #[derive(Debug, Clone)]
 struct ArchEntry {
     name: String,
@@ -53,7 +55,7 @@ impl TarVfs {
         let mut entries = BTreeMap::new();
         for hdr in a.entries_with_seek().map_err(Error::Io)? {
             let h = hdr.map_err(Error::Io)?;
-            if let Some(e) = build_entry_for_header(&h, /*compressed*/ false)? {
+            if let Some(e) = build_entry_for_header(&h) {
                 entries.insert(e.0, e.1);
             }
         }
@@ -72,31 +74,20 @@ impl TarVfs {
         c: crate::Compression,
     ) -> Result<Self> {
         let f = std::fs::File::open(path).map_err(Error::Io)?;
-        let mut buf = Vec::new();
-        match c {
-            crate::Compression::Gz => {
-                let mut d = flate2::read::GzDecoder::new(f);
-                d.read_to_end(&mut buf).map_err(Error::Io)?;
-            }
-            crate::Compression::Bz2 => {
-                let mut d = bzip2::read::BzDecoder::new(f);
-                d.read_to_end(&mut buf).map_err(Error::Io)?;
-            }
-            crate::Compression::Xz => {
-                let mut d = xz2::read::XzDecoder::new(f);
-                d.read_to_end(&mut buf).map_err(Error::Io)?;
-            }
+        let buf = match c {
+            crate::Compression::Gz => decompress_capped(flate2::read::GzDecoder::new(f))?,
+            crate::Compression::Bz2 => decompress_capped(bzip2::read::BzDecoder::new(f))?,
+            crate::Compression::Xz => decompress_capped(xz2::read::XzDecoder::new(f))?,
             crate::Compression::Zst => {
-                let mut d = zstd::Decoder::new(f).map_err(Error::Io)?;
-                d.read_to_end(&mut buf).map_err(Error::Io)?;
+                decompress_capped(zstd::Decoder::new(f).map_err(Error::Io)?)?
             }
-        }
+        };
         let arc: Arc<[u8]> = Arc::from(buf);
         let mut entries = BTreeMap::new();
         let mut a = tar::Archive::new(Cursor::new(arc));
         for hdr in a.entries().map_err(Error::Io)? {
             let mut h = hdr.map_err(Error::Io)?;
-            if let Some((name, mut e)) = build_entry_for_header(&h, /*compressed*/ true)? {
+            if let Some((name, mut e)) = build_entry_for_header(&h) {
                 if matches!(e.kind, EntryKind::File) {
                     let mut data = Vec::with_capacity(e.size as usize);
                     h.read_to_end(&mut data).map_err(Error::Io)?;
@@ -121,35 +112,21 @@ impl TarVfs {
             .rev()
             .find(|l| l.scheme == self.scheme)
             .ok_or_else(|| Error::InvalidPath(format!("vpath has no {} layer", self.scheme)))?;
-        Ok(normalize_key(&layer.sub.to_string_lossy()))
+        safe_archive_key(&layer.sub.to_string_lossy())
+            .ok_or_else(|| Error::InvalidPath(format!("path traversal in {p}")))
     }
 }
 
-fn normalize_key(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 1);
-    if !s.starts_with('/') {
-        out.push('/');
-    }
-    out.push_str(s.trim_end_matches('/'));
-    if out.is_empty() {
-        out.push('/');
-    }
-    out
-}
-
-fn build_entry_for_header(
-    h: &tar::Entry<'_, impl Read>,
-    _compressed: bool,
-) -> Result<Option<(String, ArchEntry)>> {
-    let path = match h.path() {
-        Ok(p) => p,
-        Err(_) => return Ok(None),
-    };
+fn build_entry_for_header(h: &tar::Entry<'_, impl Read>) -> Option<(String, ArchEntry)> {
+    let path = h.path().ok()?;
     let p_str = path.to_string_lossy().to_string();
     if p_str.is_empty() || p_str == "/" || p_str == "./" {
-        return Ok(None);
+        return None;
     }
-    let key = normalize_key(p_str.trim_end_matches('/'));
+    let Some(key) = safe_archive_key(p_str.trim_end_matches('/')) else {
+        tracing::warn!("tar: skipping traversal entry {p_str:?}");
+        return None;
+    };
     let kind = match h.header().entry_type() {
         tar::EntryType::Directory => EntryKind::Dir,
         tar::EntryType::Symlink => EntryKind::Symlink,
@@ -169,7 +146,10 @@ fn build_entry_for_header(
         .ok()
         .flatten()
         .map(|p| p.to_string_lossy().into_owned());
-    let name = key.rsplit_once('/').map_or(key.as_str(), |(_, n)| n).to_string();
+    let name = key
+        .rsplit_once('/')
+        .map_or(key.as_str(), |(_, n)| n)
+        .to_string();
     let entry = ArchEntry {
         name,
         kind,
@@ -180,7 +160,7 @@ fn build_entry_for_header(
         mtime,
         link_target,
     };
-    Ok(Some((key, entry)))
+    Some((key, entry))
 }
 
 fn build_child_index(entries: &BTreeMap<String, ArchEntry>) -> BTreeMap<String, Vec<String>> {
@@ -405,6 +385,11 @@ mod tests {
         b.append(&h, body.as_ref()).unwrap();
         b.into_inner().unwrap().flush().unwrap();
     }
+
+    // Note: the `tar` crate's `set_path` refuses to write `..` entries on the
+    // build side, so a malicious-tar integration test would need to hand-roll
+    // raw tar bytes. The traversal-rejection logic is covered by the
+    // `safe_archive_key` unit tests in `lib.rs` and by `zip_vfs::zip_rejects_traversal`.
 
     #[tokio::test]
     async fn open_and_list_uncompressed_tar() {

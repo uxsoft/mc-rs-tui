@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mc_config::{
@@ -12,11 +12,11 @@ use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use mc_core::{Entry, EntryKind, VPath};
 use mc_jobs::{JobQueue, JobUpdateRx};
 use mc_vfs::{Registry, Vfs};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 use tracing::warn;
 
 use crate::theme::rtc;
@@ -26,7 +26,7 @@ use crate::dialog::{
     FindResultsOutcome, HotlistAction, HotlistDialog, InputDialog, MenuBar, MenuChoice, MenuDialog,
     ProgressDialog,
 };
-use crate::panel::{render_panel, ListingMode, PanelState};
+use crate::panel::{ListingMode, PanelState, render_panel};
 
 #[derive(Debug, Clone)]
 pub struct JobLogEntry {
@@ -38,29 +38,65 @@ pub struct JobLogEntry {
 
 #[derive(Debug, Clone)]
 pub enum PendingOp {
-    Mkdir { in_dir: VPath, name: String },
-    Rename { src: VPath, new_name: String },
-    Chmod { targets: Vec<VPath>, mode: u32 },
-    RunEditor { file: PathBuf, line: Option<u32> },
+    Mkdir {
+        in_dir: VPath,
+        name: String,
+    },
+    Rename {
+        src: VPath,
+        new_name: String,
+    },
+    Chmod {
+        targets: Vec<VPath>,
+        mode: u32,
+    },
+    RunEditor {
+        file: PathBuf,
+        line: Option<u32>,
+    },
     /// Submit a recursive copy job.
-    SubmitCopy { sources: Vec<VPath>, dst_dir: VPath },
+    SubmitCopy {
+        sources: Vec<VPath>,
+        dst_dir: VPath,
+    },
     /// Submit a recursive move job.
-    SubmitMove { sources: Vec<VPath>, dst_dir: VPath },
+    SubmitMove {
+        sources: Vec<VPath>,
+        dst_dir: VPath,
+    },
     /// Submit a recursive delete job.
-    SubmitDelete { targets: Vec<VPath> },
+    SubmitDelete {
+        targets: Vec<VPath>,
+    },
     /// Start a Find over the active panel's cwd with the given form params.
-    StartFind { start: VPath, params: FindParams },
+    StartFind {
+        start: VPath,
+        params: FindParams,
+    },
     /// Run a shell command line with terminal suspend/restore. `cwd` is the
     /// directory the command runs in; `cmd` already has `%`-macros expanded.
-    RunShell { cwd: PathBuf, cmd: String },
+    RunShell {
+        cwd: PathBuf,
+        cmd: String,
+    },
     /// Suspend the TUI, drop the user into `$SHELL` interactive in `cwd`,
     /// restore on exit. Phase 13 first cut (no cwd-sync via PROMPT_COMMAND).
-    DropToShell { cwd: PathBuf },
+    DropToShell {
+        cwd: PathBuf,
+    },
     /// User submitted a password for a remote-VFS retry.
     RetryRemoteWithPassword {
         scheme: String,
         location: String,
         password: String,
+    },
+    /// User confirmed an unknown SSH host fingerprint; record it in
+    /// known_hosts and retry the SFTP connection.
+    AcceptHostKeyAndRetry {
+        scheme: String,
+        location: String,
+        algorithm: String,
+        fingerprint: String,
     },
     /// Change owner / group on each target. `uid` / `gid` may be `None`
     /// to leave that side unchanged.
@@ -70,7 +106,10 @@ pub enum PendingOp {
         gid: Option<u32>,
     },
     /// Create a hard link.
-    Hardlink { src: PathBuf, link: PathBuf },
+    Hardlink {
+        src: PathBuf,
+        link: PathBuf,
+    },
     /// Create a symbolic link. If `relative`, `target` is rewritten
     /// relative to `link`'s parent before calling `symlink`.
     Symlink {
@@ -79,12 +118,20 @@ pub enum PendingOp {
         relative: bool,
     },
     /// Replace `link`'s target with `new_target`.
-    EditSymlink { link: PathBuf, new_target: PathBuf },
+    EditSymlink {
+        link: PathBuf,
+        new_target: PathBuf,
+    },
     /// Recursively compute size of each subdirectory of `cwd`. Local only.
-    ComputeSizes { cwd: VPath },
+    ComputeSizes {
+        cwd: VPath,
+    },
     /// Run `cmd` via `sh -c`, parse stdout as one path per line, and
     /// populate the active panel with those entries.
-    ExternalPanelize { cwd: PathBuf, cmd: String },
+    ExternalPanelize {
+        cwd: PathBuf,
+        cmd: String,
+    },
 }
 
 #[derive(Debug)]
@@ -141,8 +188,14 @@ enum Modal {
         kind: CopyMoveKind,
     },
     Rename(InputDialog, VPath),
-    SelectGroup { dlg: InputDialog, select: bool },
-    Chmod { dlg: InputDialog, targets: Vec<VPath> },
+    SelectGroup {
+        dlg: InputDialog,
+        select: bool,
+    },
+    Chmod {
+        dlg: InputDialog,
+        targets: Vec<VPath>,
+    },
     /// Two-step Ctrl-X chord: waiting for the second key.
     PrefixCtrlX,
     /// A long-running job is in flight (or just finished).
@@ -167,14 +220,40 @@ enum Modal {
         scheme: String,
         location: String,
     },
+    /// Awaiting confirmation that the user trusts this SSH host's fingerprint
+    /// for the first time. On Yes, the fingerprint is recorded in
+    /// known_hosts and the connection is retried.
+    HostKeyConfirm {
+        dlg: ConfirmDialog,
+        scheme: String,
+        location: String,
+        algorithm: String,
+        fingerprint: String,
+    },
     Viewer(crate::viewer_widget::ViewerWidget),
     /// Type-ahead filter; `String` is the current filter.
     QuickSearch(String),
-    Chown { dlg: InputDialog, targets: Vec<VPath> },
-    Chattr { dlg: InputDialog, targets: Vec<VPath> },
-    Hardlink { dlg: InputDialog, src: VPath },
-    Symlink { dlg: InputDialog, src: VPath, relative: bool },
-    EditSymlink { dlg: InputDialog, link: PathBuf },
+    Chown {
+        dlg: InputDialog,
+        targets: Vec<VPath>,
+    },
+    Chattr {
+        dlg: InputDialog,
+        targets: Vec<VPath>,
+    },
+    Hardlink {
+        dlg: InputDialog,
+        src: VPath,
+    },
+    Symlink {
+        dlg: InputDialog,
+        src: VPath,
+        relative: bool,
+    },
+    EditSymlink {
+        dlg: InputDialog,
+        link: PathBuf,
+    },
     Filter(InputDialog),
     VfsList(crate::dialog::VfsListDialog),
     ExternalPanelize(InputDialog),
@@ -231,8 +310,8 @@ impl App {
         let (jobs, rx) = JobQueue::new(256);
         let paths = ConfigPaths::discover();
         let hotlist = Hotlist::load(&paths.config_dir.join("hotlist.toml")).unwrap_or_default();
-        let ext_cfg = ExtBindings::load(&paths.config_dir.join("extbind.toml"))
-            .unwrap_or_else(|e| {
+        let ext_cfg =
+            ExtBindings::load(&paths.config_dir.join("extbind.toml")).unwrap_or_else(|e| {
                 tracing::warn!("extbind: load failed: {e}");
                 ExtBindings::defaults()
             });
@@ -250,6 +329,10 @@ impl App {
             tracing::warn!("{w}");
         }
         let cmd_history = History::load(paths.config_dir.join("cmd_history"), 100);
+        let highlight = FileHighlight::load(&paths.filehighlight()).unwrap_or_else(|e| {
+            tracing::warn!("filehighlight: load failed: {e}");
+            FileHighlight::defaults()
+        });
         let app = Self {
             config,
             registry,
@@ -258,7 +341,7 @@ impl App {
             active_left: true,
             jobs,
             job_log: std::collections::VecDeque::with_capacity(64),
-            highlight: FileHighlight::defaults(),
+            highlight,
             hotlist,
             paths,
             extbinds,
@@ -332,10 +415,7 @@ impl App {
 
     pub fn handle_job_update(&mut self, update: mc_jobs::JobUpdate) {
         // Update / append the job-log row.
-        let row = self
-            .job_log
-            .iter_mut()
-            .find(|r| r.id == update.id);
+        let row = self.job_log.iter_mut().find(|r| r.id == update.id);
         match (&update.kind, row) {
             (mc_jobs::JobUpdateKind::Started { description }, None) => {
                 if self.job_log.len() >= 64 {
@@ -421,6 +501,30 @@ impl App {
         };
     }
 
+    /// Open a confirm modal for an unknown SSH host fingerprint. On Yes the
+    /// fingerprint is recorded and the connection retried.
+    pub fn prompt_host_key_confirm(
+        &mut self,
+        scheme: String,
+        location: String,
+        algorithm: String,
+        fingerprint: String,
+    ) {
+        if !matches!(self.modal, Modal::None) {
+            return;
+        }
+        let message = format!(
+            "Unknown host {location}.\n{algorithm} fingerprint:\n{fingerprint}\n\nTrust and continue?"
+        );
+        self.modal = Modal::HostKeyConfirm {
+            dlg: ConfirmDialog::new(" Unknown host key ", message),
+            scheme,
+            location,
+            algorithm,
+            fingerprint,
+        };
+    }
+
     pub async fn ensure_remote_mount(&mut self) {
         // Snapshot every (scheme, location, sample-vpath) triple that needs a
         // backend; mutate registry/modal afterwards (no borrows during await).
@@ -456,6 +560,19 @@ impl App {
                                 location.clone(),
                                 std::sync::Arc::new(vfs),
                             );
+                        }
+                        Err(mc_core::Error::HostKeyUnknown {
+                            host_port: _,
+                            algorithm,
+                            fingerprint,
+                        }) => {
+                            self.prompt_host_key_confirm(
+                                "sftp".into(),
+                                location,
+                                algorithm,
+                                fingerprint,
+                            );
+                            return;
                         }
                         Err(e) => {
                             tracing::warn!("sftp connect {location}: {e}");
@@ -573,10 +690,13 @@ impl App {
             has_children: true,
         });
         if let Ok(entries) = vfs.read_dir(&cwd).await {
-            let mut dirs: Vec<&mc_core::Entry> = entries.iter().filter(|e| e.is_dir() && e.name != "..").collect();
+            let mut dirs: Vec<&mc_core::Entry> = entries
+                .iter()
+                .filter(|e| e.is_dir() && e.name != "..")
+                .collect();
             dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
             for d in dirs {
-                if let Some(child) = child_path(&cwd, &d.name) {
+                if let Some(child) = VPath::child(&cwd, &d.name) {
                     nodes.push(crate::panel::TreeNode {
                         name: d.name.clone(),
                         depth: 1,
@@ -587,7 +707,11 @@ impl App {
                 }
             }
         }
-        let panel = if self.active_left { &mut self.left } else { &mut self.right };
+        let panel = if self.active_left {
+            &mut self.left
+        } else {
+            &mut self.right
+        };
         panel.tree.nodes = nodes;
         panel.tree.cursor = 0;
     }
@@ -602,7 +726,11 @@ impl App {
             }
         };
         if expanded {
-            let panel = if self.active_left { &mut self.left } else { &mut self.right };
+            let panel = if self.active_left {
+                &mut self.left
+            } else {
+                &mut self.right
+            };
             let mut end = cursor + 1;
             while end < panel.tree.nodes.len() && panel.tree.nodes[end].depth > depth {
                 end += 1;
@@ -616,10 +744,13 @@ impl App {
             };
             let mut children: Vec<crate::panel::TreeNode> = Vec::new();
             if let Ok(entries) = vfs.read_dir(&path).await {
-                let mut dirs: Vec<&mc_core::Entry> = entries.iter().filter(|e| e.is_dir() && e.name != "..").collect();
+                let mut dirs: Vec<&mc_core::Entry> = entries
+                    .iter()
+                    .filter(|e| e.is_dir() && e.name != "..")
+                    .collect();
                 dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                 for d in dirs {
-                    if let Some(c) = child_path(&path, &d.name) {
+                    if let Some(c) = VPath::child(&path, &d.name) {
                         children.push(crate::panel::TreeNode {
                             name: d.name.clone(),
                             depth: depth + 1,
@@ -630,7 +761,11 @@ impl App {
                     }
                 }
             }
-            let panel = if self.active_left { &mut self.left } else { &mut self.right };
+            let panel = if self.active_left {
+                &mut self.left
+            } else {
+                &mut self.right
+            };
             for (i, c) in children.into_iter().enumerate() {
                 panel.tree.nodes.insert(cursor + 1 + i, c);
             }
@@ -639,7 +774,11 @@ impl App {
     }
 
     pub async fn refresh_panel(&mut self, left: bool) {
-        let panel = if left { &mut self.left } else { &mut self.right };
+        let panel = if left {
+            &mut self.left
+        } else {
+            &mut self.right
+        };
         // Skip the read_dir for virtually-panelized panels — they hold a
         // synthetic entry list (Find-and-panelize / External panelize) that
         // we don't want to overwrite until the user navigates away.
@@ -788,9 +927,19 @@ impl App {
                 },
             },
             Modal::PrefixCtrlX => self.handle_ctrl_x(chord),
-            Modal::CopyMove { mut dlg, sources, src_cwd, kind } => match dlg.handle_key(chord) {
+            Modal::CopyMove {
+                mut dlg,
+                sources,
+                src_cwd,
+                kind,
+            } => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
-                    self.modal = Modal::CopyMove { dlg, sources, src_cwd, kind };
+                    self.modal = Modal::CopyMove {
+                        dlg,
+                        sources,
+                        src_cwd,
+                        kind,
+                    };
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
@@ -800,10 +949,7 @@ impl App {
                         CopyMoveKind::Move => PendingOp::SubmitMove { sources, dst_dir },
                     }),
                     None => {
-                        self.set_status(format!(
-                            "{}: invalid destination: {input}",
-                            kind.verb()
-                        ));
+                        self.set_status(format!("{}: invalid destination: {input}", kind.verb()));
                         let prompt = format!("{} to:", kind.verb());
                         self.modal = Modal::CopyMove {
                             dlg: InputDialog::new(kind.title(), &prompt, input),
@@ -821,10 +967,9 @@ impl App {
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
-                DialogOutcome::Submitted(new_name) => Disposition::RunOp(PendingOp::Rename {
-                    src,
-                    new_name,
-                }),
+                DialogOutcome::Submitted(new_name) => {
+                    Disposition::RunOp(PendingOp::Rename { src, new_name })
+                }
             },
             Modal::SelectGroup { mut dlg, select } => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
@@ -919,35 +1064,33 @@ impl App {
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
-                DialogOutcome::Submitted(action) => {
-                    match action {
-                        HotlistAction::AddCurrent => {
-                            let p = self.active_ref().cwd.to_string();
-                            let label = p
-                                .rsplit_once(['/', '\\'])
-                                .map_or(p.clone(), |(_, n)| n.to_string());
-                            self.hotlist.add(label, p);
-                            self.save_hotlist();
-                            self.modal = Modal::Hotlist(HotlistDialog::new(self.hotlist.clone()));
+                DialogOutcome::Submitted(action) => match action {
+                    HotlistAction::AddCurrent => {
+                        let p = self.active_ref().cwd.to_string();
+                        let label = p
+                            .rsplit_once(['/', '\\'])
+                            .map_or(p.clone(), |(_, n)| n.to_string());
+                        self.hotlist.add(label, p);
+                        self.save_hotlist();
+                        self.modal = Modal::Hotlist(HotlistDialog::new(self.hotlist.clone()));
+                        Disposition::Redraw
+                    }
+                    HotlistAction::Remove(idx) => {
+                        self.hotlist.remove_at(idx);
+                        self.save_hotlist();
+                        self.modal = Modal::Hotlist(HotlistDialog::new(self.hotlist.clone()));
+                        Disposition::Redraw
+                    }
+                    HotlistAction::Navigate(s) => {
+                        if let Ok(p) = s.parse::<VPath>() {
+                            self.active().navigate(p);
+                            Disposition::ReloadActive
+                        } else {
+                            tracing::warn!("hotlist: bad vpath {s:?}");
                             Disposition::Redraw
-                        }
-                        HotlistAction::Remove(idx) => {
-                            self.hotlist.remove_at(idx);
-                            self.save_hotlist();
-                            self.modal = Modal::Hotlist(HotlistDialog::new(self.hotlist.clone()));
-                            Disposition::Redraw
-                        }
-                        HotlistAction::Navigate(s) => {
-                            if let Ok(p) = s.parse::<VPath>() {
-                                self.active().navigate(p);
-                                Disposition::ReloadActive
-                            } else {
-                                tracing::warn!("hotlist: bad vpath {s:?}");
-                                Disposition::Redraw
-                            }
                         }
                     }
-                }
+                },
             },
             Modal::Progress(dlg) => match (chord.code, chord.mods) {
                 // Ctrl-C cancels the running job (still closes the dialog).
@@ -1002,9 +1145,17 @@ impl App {
                 }
                 DialogOutcome::Cancelled | DialogOutcome::Submitted(()) => Disposition::Redraw,
             },
-            Modal::Password { mut dlg, scheme, location } => match dlg.handle_key(chord) {
+            Modal::Password {
+                mut dlg,
+                scheme,
+                location,
+            } => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
-                    self.modal = Modal::Password { dlg, scheme, location };
+                    self.modal = Modal::Password {
+                        dlg,
+                        scheme,
+                        location,
+                    };
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
@@ -1013,6 +1164,36 @@ impl App {
                         scheme,
                         location,
                         password: pw,
+                    })
+                }
+            },
+            Modal::HostKeyConfirm {
+                mut dlg,
+                scheme,
+                location,
+                algorithm,
+                fingerprint,
+            } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::HostKeyConfirm {
+                        dlg,
+                        scheme,
+                        location,
+                        algorithm,
+                        fingerprint,
+                    };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled | DialogOutcome::Submitted(false) => {
+                    self.set_status(format!("rejected host key for {location}"));
+                    Disposition::Redraw
+                }
+                DialogOutcome::Submitted(true) => {
+                    Disposition::RunOp(PendingOp::AcceptHostKeyAndRetry {
+                        scheme,
+                        location,
+                        algorithm,
+                        fingerprint,
                     })
                 }
             },
@@ -1065,9 +1246,7 @@ impl App {
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
                 DialogOutcome::Submitted(s) => match parse_chown(&s) {
-                    Some((uid, gid)) => {
-                        Disposition::RunOp(PendingOp::Chown { targets, uid, gid })
-                    }
+                    Some((uid, gid)) => Disposition::RunOp(PendingOp::Chown { targets, uid, gid }),
                     None => {
                         self.set_status(format!("chown: cannot resolve {s:?}"));
                         Disposition::Redraw
@@ -1123,7 +1302,11 @@ impl App {
                     })
                 }
             },
-            Modal::Symlink { mut dlg, src, relative } => match dlg.handle_key(chord) {
+            Modal::Symlink {
+                mut dlg,
+                src,
+                relative,
+            } => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
                     self.modal = Modal::Symlink { dlg, src, relative };
                     Disposition::Redraw
@@ -1311,8 +1494,7 @@ impl App {
         let location = format!("mount-{mount_id}");
         match mc_vfs_archive::mount_local(&local_path, kind, scheme) {
             Ok(vfs) => {
-                self.registry
-                    .register_mount(scheme, location.clone(), vfs);
+                self.registry.register_mount(scheme, location.clone(), vfs);
                 let mut p = target.clone();
                 p.push_layer(mc_core::path::Layer {
                     scheme: scheme.to_string(),
@@ -1332,7 +1514,11 @@ impl App {
     /// cursor file. Both must be local regular files for this initial cut.
     fn open_diff(&mut self) -> Disposition {
         let active = self.active_ref();
-        let other = if self.active_left { &self.right } else { &self.left };
+        let other = if self.active_left {
+            &self.right
+        } else {
+            &self.left
+        };
         let lp = match active.cursor_path() {
             Some(p) => p,
             None => return Disposition::Redraw,
@@ -1398,7 +1584,11 @@ impl App {
 
     fn macro_ctx(&self) -> mc_core::MacroCtx {
         let active = self.active_ref();
-        let other = if self.active_left { &self.right } else { &self.left };
+        let other = if self.active_left {
+            &self.right
+        } else {
+            &self.left
+        };
         let current = active
             .entries
             .get(active.cursor)
@@ -1493,17 +1683,13 @@ impl App {
                 Disposition::Redraw
             }
             MenuDialog::Hardlink => {
-                let Some(src) = self
-                    .active_ref()
-                    .cursor_path()
-                    .filter(|_| {
-                        self.active_ref()
-                            .entries
-                            .get(self.active_ref().cursor)
-                            .map(|e| e.name != "..")
-                            .unwrap_or(false)
-                    })
-                else {
+                let Some(src) = self.active_ref().cursor_path().filter(|_| {
+                    self.active_ref()
+                        .entries
+                        .get(self.active_ref().cursor)
+                        .map(|e| e.name != "..")
+                        .unwrap_or(false)
+                }) else {
                     return Disposition::Redraw;
                 };
                 let default_link = default_link_name(&src);
@@ -1514,21 +1700,21 @@ impl App {
                 Disposition::Redraw
             }
             MenuDialog::Symlink { relative } => {
-                let Some(src) = self
-                    .active_ref()
-                    .cursor_path()
-                    .filter(|_| {
-                        self.active_ref()
-                            .entries
-                            .get(self.active_ref().cursor)
-                            .map(|e| e.name != "..")
-                            .unwrap_or(false)
-                    })
-                else {
+                let Some(src) = self.active_ref().cursor_path().filter(|_| {
+                    self.active_ref()
+                        .entries
+                        .get(self.active_ref().cursor)
+                        .map(|e| e.name != "..")
+                        .unwrap_or(false)
+                }) else {
                     return Disposition::Redraw;
                 };
                 let default_link = default_link_name(&src);
-                let title = if relative { " Relative symlink " } else { " Symbolic link " };
+                let title = if relative {
+                    " Relative symlink "
+                } else {
+                    " Symbolic link "
+                };
                 self.modal = Modal::Symlink {
                     dlg: InputDialog::new(title, "Link path:", default_link),
                     src,
@@ -1595,8 +1781,7 @@ impl App {
                     self.set_status("no active VFS mounts");
                     return Disposition::Redraw;
                 }
-                self.modal =
-                    Modal::VfsList(crate::dialog::VfsListDialog::new(mounts));
+                self.modal = Modal::VfsList(crate::dialog::VfsListDialog::new(mounts));
                 Disposition::Redraw
             }
             MenuDialog::ExternalPanelize => {
@@ -1613,13 +1798,10 @@ impl App {
             }
             MenuDialog::EditMenuFile => self.edit_config_file(self.paths.user_menu()),
             MenuDialog::EditExtensionFile => self.edit_config_file(self.paths.extbind()),
-            MenuDialog::EditHighlightingFile => {
-                self.edit_config_file(self.paths.filehighlight())
-            }
+            MenuDialog::EditHighlightingFile => self.edit_config_file(self.paths.filehighlight()),
             MenuDialog::Configuration => {
-                self.modal = Modal::Configuration(crate::dialog::OptionsDialog::configuration(
-                    &self.config,
-                ));
+                self.modal =
+                    Modal::Configuration(crate::dialog::OptionsDialog::configuration(&self.config));
                 Disposition::Redraw
             }
             MenuDialog::Layout => {
@@ -1627,9 +1809,8 @@ impl App {
                 Disposition::Redraw
             }
             MenuDialog::Confirmation => {
-                self.modal = Modal::Confirmation(crate::dialog::OptionsDialog::confirmation(
-                    &self.config,
-                ));
+                self.modal =
+                    Modal::Confirmation(crate::dialog::OptionsDialog::confirmation(&self.config));
                 Disposition::Redraw
             }
             MenuDialog::VirtualFs => {
@@ -1670,7 +1851,10 @@ impl App {
             }
             let _ = std::fs::write(&path, "# created by mc-rs\n");
         }
-        Disposition::RunOp(PendingOp::RunEditor { file: path, line: None })
+        Disposition::RunOp(PendingOp::RunEditor {
+            file: path,
+            line: None,
+        })
     }
 
     /// Replace the active panel's entries with synthetic rows for `items`,
@@ -1680,7 +1864,9 @@ impl App {
         let mut entries: Vec<Entry> = Vec::with_capacity(items.len());
         for vp in &items {
             let local = vpath_to_local(vp);
-            let (size, kind) = match local.as_ref().and_then(|p| std::fs::symlink_metadata(p).ok())
+            let (size, kind) = match local
+                .as_ref()
+                .and_then(|p| std::fs::symlink_metadata(p).ok())
             {
                 Some(md) => {
                     let k = if md.is_dir() {
@@ -1768,10 +1954,8 @@ impl App {
     /// modal, depending on `config.options.confirm_exit`.
     fn maybe_confirm_quit(&mut self) -> Disposition {
         if self.config.options.confirm_exit {
-            self.modal = Modal::QuitConfirm(ConfirmDialog::new(
-                " Quit ",
-                "Quit Midnight Commander?",
-            ));
+            self.modal =
+                Modal::QuitConfirm(ConfirmDialog::new(" Quit ", "Quit Midnight Commander?"));
             Disposition::Redraw
         } else {
             Disposition::Quit
@@ -1785,14 +1969,22 @@ impl App {
 
     fn compare_dirs(&mut self) {
         // Build maps from name → size for both panels (skipping ".." and dirs).
-        let other = if self.active_left { &self.right } else { &self.left };
+        let other = if self.active_left {
+            &self.right
+        } else {
+            &self.left
+        };
         let other_by_name: std::collections::HashMap<String, u64> = other
             .entries
             .iter()
             .filter(|e| e.name != ".." && !e.is_dir())
             .map(|e| (e.name.clone(), e.size))
             .collect();
-        let active = if self.active_left { &mut self.left } else { &mut self.right };
+        let active = if self.active_left {
+            &mut self.left
+        } else {
+            &mut self.right
+        };
         active.marks.clear();
         for e in &active.entries {
             if e.name == ".." || e.is_dir() {
@@ -1812,7 +2004,11 @@ impl App {
         match (chord.code, chord.mods) {
             (KeyCode::Char('='), m) if m.is_empty() => {
                 self.compare_dirs();
-                let n = if self.active_left { self.left.marks.len() } else { self.right.marks.len() };
+                let n = if self.active_left {
+                    self.left.marks.len()
+                } else {
+                    self.right.marks.len()
+                };
                 self.set_status(format!("Compare dirs: {n} files differ"));
                 Disposition::Redraw
             }
@@ -1927,7 +2123,7 @@ impl App {
         if !p.marks.is_empty() {
             for e in &p.entries {
                 if p.marks.contains(&e.name) {
-                    if let Some(child) = child_path(&p.cwd, &e.name) {
+                    if let Some(child) = VPath::child(&p.cwd, &e.name) {
                         out.push(child);
                     }
                 }
@@ -2038,7 +2234,11 @@ impl App {
 
             // Navigation
             (KeyCode::Enter, _) => {
-                let cursor_entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
+                let cursor_entry = self
+                    .active_ref()
+                    .entries
+                    .get(self.active_ref().cursor)
+                    .cloned();
                 if let Some(e) = cursor_entry {
                     let target = self.active_ref().cursor_path();
                     if matches!(e.kind, EntryKind::Dir) {
@@ -2264,7 +2464,11 @@ impl App {
 
             // F3 — View
             (KeyCode::F(3), m) if m.is_empty() => {
-                let entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
+                let entry = self
+                    .active_ref()
+                    .entries
+                    .get(self.active_ref().cursor)
+                    .cloned();
                 let target = self.active_ref().cursor_path();
                 if let (Some(e), Some(target)) = (entry, target) {
                     // Configured View binding takes precedence over the built-in viewer.
@@ -2310,7 +2514,11 @@ impl App {
                 }
                 if sources.len() == 1 && self.active_ref().marks.is_empty() {
                     // Single cursored item → rename dialog (mc behaviour).
-                    let entry = self.active_ref().entries.get(self.active_ref().cursor).cloned();
+                    let entry = self
+                        .active_ref()
+                        .entries
+                        .get(self.active_ref().cursor)
+                        .cloned();
                     let src = sources.into_iter().next().unwrap();
                     if let Some(e) = entry {
                         if e.name != ".." {
@@ -2369,10 +2577,7 @@ impl App {
                 } else {
                     format!("Delete {} items?", targets.len())
                 };
-                self.modal = Modal::DeleteConfirm(
-                    ConfirmDialog::new(" Delete ", msg),
-                    targets,
-                );
+                self.modal = Modal::DeleteConfirm(ConfirmDialog::new(" Delete ", msg), targets);
                 Disposition::Redraw
             }
             _ => Disposition::None,
@@ -2428,7 +2633,9 @@ impl App {
             Modal::None | Modal::PrefixCtrlX | Modal::Menu => {}
             Modal::Mkdir(d) | Modal::Rename(d, _) => d.render(f, area, scheme),
             Modal::CopyMove { dlg, .. } => dlg.render(f, area, scheme),
-            Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => dlg.render(f, area, scheme),
+            Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => {
+                dlg.render(f, area, scheme)
+            }
             Modal::DeleteConfirm(d, _) => d.render(f, area, scheme),
             Modal::Viewer(v) => v.render(f, area, scheme),
             Modal::Progress(d) => d.render(f, area, scheme),
@@ -2443,6 +2650,7 @@ impl App {
             Modal::LearnKeys(d) => d.render(f, area, scheme),
             Modal::JobsView(d) => d.render(f, area, scheme),
             Modal::Password { dlg, .. } => dlg.render(f, area, scheme),
+            Modal::HostKeyConfirm { dlg, .. } => dlg.render(f, area, scheme),
             Modal::QuickSearch(filter) => render_quick_search(f, area, filter, scheme),
             Modal::Chown { dlg, .. }
             | Modal::Chattr { dlg, .. }
@@ -2460,20 +2668,38 @@ impl App {
         }
         if menu_focused {
             // Dropdown overlays the body area, anchored just under row 0.
-            let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+            let body = Rect::new(
+                area.x,
+                area.y + 1,
+                area.width,
+                area.height.saturating_sub(1),
+            );
             self.menubar.render_dropdown(f, body, scheme);
         }
         if matches!(self.modal, Modal::PrefixCtrlX) {
             let hint = Line::from(" C-x: c=chmod   (Esc to cancel) ");
-            let p = Paragraph::new(hint)
-                .style(Style::default().fg(rtc(self.scheme.op_status_fg)).bg(rtc(self.scheme.op_status_bg)));
-            let rect = ratatui::layout::Rect::new(area.x, area.y + area.height.saturating_sub(2), area.width, 1);
+            let p = Paragraph::new(hint).style(
+                Style::default()
+                    .fg(rtc(self.scheme.op_status_fg))
+                    .bg(rtc(self.scheme.op_status_bg)),
+            );
+            let rect = ratatui::layout::Rect::new(
+                area.x,
+                area.y + area.height.saturating_sub(2),
+                area.width,
+                1,
+            );
             f.render_widget(p, rect);
         }
     }
 }
 
-fn render_quick_search(f: &mut Frame<'_>, area: ratatui::layout::Rect, filter: &str, scheme: &ColorScheme) {
+fn render_quick_search(
+    f: &mut Frame<'_>,
+    area: ratatui::layout::Rect,
+    filter: &str,
+    scheme: &ColorScheme,
+) {
     let line = Line::from(vec![
         Span::raw(" Search: "),
         Span::styled(
@@ -2484,8 +2710,17 @@ fn render_quick_search(f: &mut Frame<'_>, area: ratatui::layout::Rect, filter: &
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ]);
-    let p = Paragraph::new(line).style(Style::default().fg(rtc(scheme.statusbar_fg)).bg(rtc(scheme.statusbar_bg)));
-    let rect = ratatui::layout::Rect::new(area.x, area.y + area.height.saturating_sub(2), area.width, 1);
+    let p = Paragraph::new(line).style(
+        Style::default()
+            .fg(rtc(scheme.statusbar_fg))
+            .bg(rtc(scheme.statusbar_bg)),
+    );
+    let rect = ratatui::layout::Rect::new(
+        area.x,
+        area.y + area.height.saturating_sub(2),
+        area.width,
+        1,
+    );
     f.render_widget(p, rect);
 }
 
@@ -2543,25 +2778,15 @@ fn parse_dst(input: &str, src_cwd: &VPath) -> Option<VPath> {
     None
 }
 
-fn child_path(parent: &VPath, name: &str) -> Option<VPath> {
-    let last = parent.last()?.clone();
-    let mut sub = last.sub.clone();
-    sub.push(name);
-    let mut new_layer = last;
-    new_layer.sub = sub;
-    let mut new = parent.clone();
-    new.pop_layer();
-    new.push_layer(new_layer);
-    Some(new)
-}
-
 fn next_mount_id() -> u64 {
     static N: AtomicU64 = AtomicU64::new(1);
     N.fetch_add(1, Ordering::Relaxed)
 }
 
 fn parse_octal_mode(s: &str) -> Option<u32> {
-    u32::from_str_radix(s.trim(), 8).ok().filter(|&m| m <= 0o7777)
+    u32::from_str_radix(s.trim(), 8)
+        .ok()
+        .filter(|&m| m <= 0o7777)
 }
 
 /// Parse a `user:group` chown spec. Either side may be empty (returns `None`
@@ -2634,7 +2859,10 @@ fn default_link_name(src: &VPath) -> String {
         None => return String::new(),
     };
     let mut sub = layer.sub.clone();
-    let stem = sub.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = sub
+        .file_name()
+        .map(|x| x.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let parent = sub.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let link_name = format!("{stem}_link");
     sub = parent;
@@ -2749,7 +2977,7 @@ mod tests {
     #[test]
     fn child_path_appends() {
         let p = VPath::local("/a/b");
-        let c = child_path(&p, "c").unwrap();
+        let c = VPath::child(&p, "c").unwrap();
         assert_eq!(c.last().unwrap().sub.to_str().unwrap(), "/a/b/c");
     }
 }
@@ -2774,11 +3002,15 @@ fn render_buttonbar(f: &mut Frame<'_>, area: ratatui::layout::Rect, scheme: &Col
         }
         spans.push(Span::styled(
             format!("{n}"),
-            Style::default().fg(rtc(scheme.buttonbar_fg)).bg(rtc(scheme.buttonbar_bg)),
+            Style::default()
+                .fg(rtc(scheme.buttonbar_fg))
+                .bg(rtc(scheme.buttonbar_bg)),
         ));
         spans.push(Span::styled(
             *name,
-            Style::default().fg(rtc(scheme.buttonbar_label_fg)).bg(rtc(scheme.buttonbar_label_bg)),
+            Style::default()
+                .fg(rtc(scheme.buttonbar_label_fg))
+                .bg(rtc(scheme.buttonbar_label_bg)),
         ));
     }
     let line = Line::from(spans);

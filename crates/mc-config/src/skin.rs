@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::scheme::{apply_override, ColorScheme};
+use crate::scheme::{ColorScheme, apply_override};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -43,13 +43,7 @@ impl SkinFile {
     }
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Self::from_toml(&s).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
-        }
+        crate::io::load_toml_or_default(path)
     }
 
     /// Resolve to a concrete [`ColorScheme`]: pick the named base theme,
@@ -101,9 +95,9 @@ pub fn parse_color(s: &str) -> Result<ThemeColor, String> {
     if lower == "reset" || lower == "default" {
         return Ok(ThemeColor::Reset);
     }
-    let hex = t.strip_prefix('#').ok_or_else(|| {
-        format!("color '{s}' must be #rrggbb, #rgb, or 'reset'")
-    })?;
+    let hex = t
+        .strip_prefix('#')
+        .ok_or_else(|| format!("color '{s}' must be #rrggbb, #rgb, or 'reset'"))?;
     match hex.len() {
         6 => {
             let r = u8::from_str_radix(&hex[0..2], 16).map_err(|e| e.to_string())?;
@@ -161,7 +155,10 @@ mod tests {
             "##,
         )
         .unwrap();
-        assert_eq!(s.colors.get("panel_bg").map(String::as_str), Some("#101018"));
+        assert_eq!(
+            s.colors.get("panel_bg").map(String::as_str),
+            Some("#101018")
+        );
     }
 
     #[test]
@@ -172,9 +169,15 @@ mod tests {
 
     #[test]
     fn parse_color_hex() {
-        assert_eq!(parse_color("#1e1e2e"), Ok(ThemeColor::Rgb(0x1e, 0x1e, 0x2e)));
+        assert_eq!(
+            parse_color("#1e1e2e"),
+            Ok(ThemeColor::Rgb(0x1e, 0x1e, 0x2e))
+        );
         assert_eq!(parse_color("#FFF"), Ok(ThemeColor::Rgb(0xff, 0xff, 0xff)));
-        assert_eq!(parse_color("  #abc  "), Ok(ThemeColor::Rgb(0xaa, 0xbb, 0xcc)));
+        assert_eq!(
+            parse_color("  #abc  "),
+            Ok(ThemeColor::Rgb(0xaa, 0xbb, 0xcc))
+        );
         assert_eq!(parse_color("reset"), Ok(ThemeColor::Reset));
         assert_eq!(parse_color("Default"), Ok(ThemeColor::Reset));
         assert!(parse_color("blue").is_err());

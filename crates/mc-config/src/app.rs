@@ -21,22 +21,12 @@ pub struct AppConfig {
     pub panel_right: Option<PanelStateSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PanelsConfig {
     pub show_hidden: bool,
     pub mix_dirs: bool,
     pub case_sensitive_sort: bool,
-}
-
-impl Default for PanelsConfig {
-    fn default() -> Self {
-        Self {
-            show_hidden: false,
-            mix_dirs: false,
-            case_sensitive_sort: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,7 +83,10 @@ pub struct LayoutConfig {
 
 impl Default for LayoutConfig {
     fn default() -> Self {
-        Self { vertical: false, left_pct: 50 }
+        Self {
+            vertical: false,
+            left_pct: 50,
+        }
     }
 }
 
@@ -148,26 +141,17 @@ impl AppConfig {
     }
 
     /// Load from `path`, falling back to `Self::default()` when the file is
-    /// absent or unparseable. Errors other than NotFound are surfaced.
+    /// absent. A malformed file returns `InvalidData`.
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Self::from_toml(&s).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
-        }
+        crate::io::load_toml_or_default(path)
     }
 
-    /// Serialize to TOML and write to `path`. Creates parent dirs as needed.
+    /// Serialize to TOML and write to `path` atomically (tempfile + rename;
+    /// `0600` perms on Unix). Creates parent dirs as needed.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let s = toml::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
-        std::fs::write(path, s)
+        let s = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        crate::io::write_user_file_atomic(path, s.as_bytes())
     }
 }
 

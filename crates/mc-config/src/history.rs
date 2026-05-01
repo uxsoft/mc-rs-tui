@@ -51,14 +51,11 @@ impl History {
     }
 
     fn save(&self) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut f = std::fs::File::create(&self.path)?;
+        let mut buf = Vec::with_capacity(self.items.iter().map(|s| s.len() + 1).sum());
         for line in &self.items {
-            writeln!(f, "{line}")?;
+            writeln!(buf, "{line}")?;
         }
-        Ok(())
+        crate::io::write_user_file_atomic(&self.path, &buf)
     }
 
     #[must_use]
@@ -150,6 +147,9 @@ mod tests {
         h.push("a".into());
         h.push("b".into());
         let h2 = History::load(p, 10);
-        assert_eq!(h2.entries().iter().cloned().collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            h2.entries().iter().cloned().collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 }

@@ -19,23 +19,13 @@ pub struct HotlistEntry {
 
 impl Hotlist {
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str(&s).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
-        }
+        crate::io::load_toml_or_default(path)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let s = toml::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
-        std::fs::write(path, s)
+        let s = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        crate::io::write_user_file_atomic(path, s.as_bytes())
     }
 
     pub fn add(&mut self, label: String, path: String) {

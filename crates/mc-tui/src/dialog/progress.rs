@@ -1,10 +1,10 @@
 use mc_config::ColorScheme;
 use mc_jobs::{JobHandle, JobOutcome, Progress};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph};
-use ratatui::Frame;
 
 use super::centered_rect;
 use crate::theme::rtc;
@@ -32,7 +32,9 @@ impl ProgressDialog {
     pub fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(72, 9, area);
         f.render_widget(Clear, rect);
-        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
+        let dlg = Style::default()
+            .fg(rtc(scheme.dialog_fg))
+            .bg(rtc(scheme.dialog_bg));
 
         let title = match &self.finished {
             None => format!(" {} ", self.description),
@@ -43,10 +45,16 @@ impl ProgressDialog {
         let block = Block::default()
             .title(Span::styled(
                 title,
-                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.dialog_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_border))
+                    .bg(rtc(scheme.dialog_bg)),
+            )
             .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
@@ -65,7 +73,8 @@ impl ProgressDialog {
         let status_line = Paragraph::new(Line::from(vec![
             Span::styled("Status: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(self.status.clone()),
-        ])).style(dlg);
+        ]))
+        .style(dlg);
         f.render_widget(status_line, layout[0]);
 
         let items_pct = pct(self.progress.items_done, self.progress.items_total);
@@ -76,7 +85,11 @@ impl ProgressDialog {
         let items_gauge = Gauge::default()
             .ratio(items_pct)
             .label(items_label)
-            .gauge_style(Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)));
+            .gauge_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_focus_fg))
+                    .bg(rtc(scheme.dialog_focus_bg)),
+            );
         f.render_widget(items_gauge, layout[1]);
 
         let bytes_pct = pct(self.progress.bytes_done, self.progress.bytes_total);
@@ -88,7 +101,11 @@ impl ProgressDialog {
         let bytes_gauge = Gauge::default()
             .ratio(bytes_pct)
             .label(bytes_label)
-            .gauge_style(Style::default().fg(rtc(scheme.diff_add_fg)).bg(rtc(scheme.diff_add_bg)));
+            .gauge_style(
+                Style::default()
+                    .fg(rtc(scheme.diff_add_fg))
+                    .bg(rtc(scheme.diff_add_bg)),
+            );
         f.render_widget(bytes_gauge, layout[2]);
 
         let hint = if self.finished.is_some() {
@@ -97,7 +114,11 @@ impl ProgressDialog {
             "Esc / Enter: hide (continues in background)   Ctrl-C: cancel"
         };
         f.render_widget(
-            Paragraph::new(hint).style(Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg))),
+            Paragraph::new(hint).style(
+                Style::default()
+                    .fg(rtc(scheme.panel_dim_fg))
+                    .bg(rtc(scheme.dialog_bg)),
+            ),
             layout[4],
         );
     }

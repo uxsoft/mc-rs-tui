@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::safe_archive_key;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18,6 +20,34 @@ mod tests {
         w.start_file("dir/hello.txt", opts).unwrap();
         w.write_all(b"zhello").unwrap();
         w.finish().unwrap();
+    }
+
+    fn make_evil_zip(path: &Path) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        w.start_file("../../etc/passwd", opts).unwrap();
+        w.write_all(b"pwn").unwrap();
+        w.finish().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn zip_rejects_traversal() {
+        let td = tempfile::tempdir().unwrap();
+        let p = td.path().join("evil.zip");
+        make_evil_zip(&p);
+        let vfs = ZipVfs::open(&p, "zip").unwrap();
+        let root = VPath::new([mc_core::path::Layer {
+            scheme: "zip".into(),
+            location: String::new(),
+            sub: "/".into(),
+        }]);
+        let entries = vfs.read_dir(&root).await.unwrap();
+        assert!(
+            entries.is_empty(),
+            "evil entry must not surface, got {entries:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -50,7 +80,9 @@ mod tests {
         }]);
         let mut r = vfs.open_read(&file_path).await.unwrap();
         let mut buf = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut r, &mut buf).await.unwrap();
+        tokio::io::AsyncReadExt::read_to_end(&mut r, &mut buf)
+            .await
+            .unwrap();
         assert_eq!(&buf, b"zhello");
     }
 }
@@ -93,11 +125,13 @@ impl ZipVfs {
             if trimmed.is_empty() {
                 continue;
             }
-            let key = if trimmed.starts_with('/') {
-                trimmed.to_string()
-            } else {
-                format!("/{trimmed}")
+            let Some(key) = safe_archive_key(trimmed) else {
+                tracing::warn!("zip: skipping traversal entry {name_raw:?}");
+                continue;
             };
+            if key == "/" {
+                continue;
+            }
             let kind = if zf.is_dir() {
                 EntryKind::Dir
             } else {
@@ -134,20 +168,9 @@ impl ZipVfs {
             .rev()
             .find(|l| l.scheme == self.scheme)
             .ok_or_else(|| Error::InvalidPath(format!("vpath has no {} layer", self.scheme)))?;
-        Ok(normalize_key(&layer.sub.to_string_lossy()))
+        safe_archive_key(&layer.sub.to_string_lossy())
+            .ok_or_else(|| Error::InvalidPath(format!("path traversal in {p}")))
     }
-}
-
-fn normalize_key(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 1);
-    if !s.starts_with('/') {
-        out.push('/');
-    }
-    out.push_str(s.trim_end_matches('/'));
-    if out.is_empty() {
-        out.push('/');
-    }
-    out
 }
 
 fn zip_to_err(e: zip::result::ZipError) -> Error {
@@ -314,4 +337,3 @@ fn zip_to_entry(e: &ZipEntry) -> Entry {
         target: None,
     }
 }
-

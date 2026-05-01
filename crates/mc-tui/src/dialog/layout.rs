@@ -2,13 +2,13 @@
 
 use mc_config::{ColorScheme, LayoutConfig};
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 pub struct LayoutDialog {

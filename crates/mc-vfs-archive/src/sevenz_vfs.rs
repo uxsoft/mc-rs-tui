@@ -13,6 +13,7 @@ use mc_core::{Entry, EntryKind, Error, Result, VPath};
 use mc_vfs::trait_::{AsyncReader, Capabilities, Vfs};
 use sevenz_rust2::{ArchiveReader, Password};
 
+use crate::safe_archive_key;
 use crate::tar_vfs::AsyncSliceReader;
 
 #[derive(Debug, Clone)]
@@ -37,7 +38,17 @@ impl SevenZVfs {
         reader
             .for_each_entries(|entry, stream| {
                 let name = entry.name().to_string();
-                let key = normalize_key(&name);
+                let Some(key) = safe_archive_key(&name) else {
+                    tracing::warn!("7z: skipping traversal entry {name:?}");
+                    let mut sink = std::io::sink();
+                    let _ = std::io::copy(stream, &mut sink);
+                    return Ok(true);
+                };
+                if key == "/" {
+                    let mut sink = std::io::sink();
+                    let _ = std::io::copy(stream, &mut sink);
+                    return Ok(true);
+                }
                 let kind = if entry.is_directory() {
                     EntryKind::Dir
                 } else {
@@ -45,7 +56,8 @@ impl SevenZVfs {
                 };
                 let size = entry.size();
                 let data = if matches!(kind, EntryKind::File) && size > 0 {
-                    let mut buf = Vec::with_capacity(size as usize);
+                    let cap = size.min(crate::MAX_DECOMPRESSED) as usize;
+                    let mut buf = Vec::with_capacity(cap);
                     stream.read_to_end(&mut buf)?;
                     Some(Arc::<[u8]>::from(buf))
                 } else {
@@ -85,19 +97,8 @@ impl SevenZVfs {
             .rev()
             .find(|l| l.scheme == self.scheme)
             .ok_or_else(|| Error::InvalidPath(format!("vpath has no {} layer", self.scheme)))?;
-        Ok(normalize_key(&layer.sub.to_string_lossy()))
-    }
-}
-
-fn normalize_key(s: &str) -> String {
-    let trimmed = s.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return "/".to_string();
-    }
-    if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
+        safe_archive_key(&layer.sub.to_string_lossy())
+            .ok_or_else(|| Error::InvalidPath(format!("path traversal in {p}")))
     }
 }
 

@@ -1,12 +1,12 @@
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 pub struct ConfirmDialog {
@@ -32,7 +32,9 @@ impl Dialog for ConfirmDialog {
     fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(60, 6, area);
         f.render_widget(Clear, rect);
-        let bg_style = Style::default().fg(rtc(scheme.danger_fg)).bg(rtc(scheme.danger_bg));
+        let bg_style = Style::default()
+            .fg(rtc(scheme.danger_fg))
+            .bg(rtc(scheme.danger_bg));
         let focus_style = Style::default()
             .fg(rtc(scheme.danger_focus_fg))
             .bg(rtc(scheme.danger_focus_bg))

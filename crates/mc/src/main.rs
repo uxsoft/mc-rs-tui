@@ -7,7 +7,11 @@ use mc_tui::App;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "mc-rs", version, about = "Rust + Ratatui port of GNU Midnight Commander")]
+#[command(
+    name = "mc-rs",
+    version,
+    about = "Rust + Ratatui port of GNU Midnight Commander"
+)]
 struct Args {
     /// Initial directory for both panels.
     #[arg(short = 'd', long)]
@@ -26,7 +30,9 @@ struct Args {
 fn main() -> Result<()> {
     color_eyre::install().ok();
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
         .with_writer(std::io::stderr)
         .try_init();
 

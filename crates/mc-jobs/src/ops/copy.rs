@@ -132,7 +132,10 @@ async fn copy_recursive(
             }
             let s = child_of(src, &k.name)?;
             let d = child_of(dst, &k.name)?;
-            Box::pin(copy_recursive(src_vfs, &s, dst_vfs, &d, overwrite, ctx, state)).await?;
+            Box::pin(copy_recursive(
+                src_vfs, &s, dst_vfs, &d, overwrite, ctx, state,
+            ))
+            .await?;
         }
     } else {
         copy_one(src_vfs, src, dst_vfs, dst, &entry, overwrite, ctx, state).await?;

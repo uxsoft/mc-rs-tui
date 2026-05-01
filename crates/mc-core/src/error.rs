@@ -20,6 +20,17 @@ pub enum Error {
     #[error("operation cancelled")]
     Cancelled,
 
+    /// SFTP saw a host whose fingerprint isn't in `known_hosts`. The caller
+    /// (UI layer) is expected to confirm with the user before recording the
+    /// fingerprint and retrying — accepting silently would defeat MITM
+    /// protection on the very first connection.
+    #[error("ssh host key unknown for {host_port} ({algorithm} {fingerprint})")]
+    HostKeyUnknown {
+        host_port: String,
+        algorithm: String,
+        fingerprint: String,
+    },
+
     #[error("not supported")]
     NotSupported,
 

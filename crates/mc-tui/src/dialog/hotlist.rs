@@ -1,12 +1,12 @@
 use mc_config::{ColorScheme, Hotlist};
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 pub enum HotlistAction {
@@ -41,14 +41,22 @@ impl Dialog for HotlistDialog {
     fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(70, 18, area);
         f.render_widget(Clear, rect);
-        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
+        let dlg = Style::default()
+            .fg(rtc(scheme.dialog_fg))
+            .bg(rtc(scheme.dialog_bg));
         let block = Block::default()
             .title(Span::styled(
                 " Hotlist ",
-                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.dialog_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_border))
+                    .bg(rtc(scheme.dialog_bg)),
+            )
             .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
@@ -65,7 +73,9 @@ impl Dialog for HotlistDialog {
 
         let height = body.height as usize;
         let lines: Vec<Line> = if self.hotlist.entries.is_empty() {
-            vec![Line::from("(no entries — press 'a' to add current directory)")]
+            vec![Line::from(
+                "(no entries — press 'a' to add current directory)",
+            )]
         } else {
             self.hotlist
                 .entries
@@ -75,7 +85,10 @@ impl Dialog for HotlistDialog {
                 .take(height)
                 .map(|(i, e)| {
                     let style = if i == self.cursor {
-                        Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(rtc(scheme.dialog_focus_fg))
+                            .bg(rtc(scheme.dialog_focus_bg))
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         dlg
                     };
@@ -91,7 +104,12 @@ impl Dialog for HotlistDialog {
         f.render_widget(
             Paragraph::new(Line::from(
                 "Enter: cd    a: add current    d: delete    Esc: close",
-            )).style(Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg))),
+            ))
+            .style(
+                Style::default()
+                    .fg(rtc(scheme.panel_dim_fg))
+                    .bg(rtc(scheme.dialog_bg)),
+            ),
             hint_area,
         );
     }

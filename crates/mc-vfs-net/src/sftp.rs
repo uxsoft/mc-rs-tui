@@ -4,8 +4,15 @@
 //! 1. ssh-agent via `$SSH_AUTH_SOCK`
 //! 2. private key files at `~/.ssh/id_ed25519` and `~/.ssh/id_rsa` (no passphrase)
 //!
-//! Host-key verification is currently TOFU-accept-everything; future work adds a
-//! `~/.cache/mc-rs/known_hosts` store.
+//! Host-key verification:
+//!   - On a *new* host the connection is **refused** and the unknown
+//!     fingerprint is surfaced as [`mc_core::Error::HostKeyUnknown`]. The UI
+//!     layer is expected to prompt the user, then call
+//!     [`SftpVfs::connect_trusting`] to record the fingerprint and retry.
+//!     Silently auto-accepting would defeat MITM protection on the very
+//!     first connection.
+//!   - On a *recorded* host whose fingerprint differs the connection is
+//!     refused outright (no UI prompt for tampering).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -33,10 +40,7 @@ impl SftpEndpoint {
     pub fn parse(loc: &str) -> Result<Self> {
         let (user, host_port) = match loc.rsplit_once('@') {
             Some((u, hp)) => (u.to_string(), hp),
-            None => (
-                std::env::var("USER").unwrap_or_else(|_| "root".into()),
-                loc,
-            ),
+            None => (std::env::var("USER").unwrap_or_else(|_| "root".into()), loc),
         };
         let (host, port) = match host_port.rsplit_once(':') {
             Some((h, p)) => (
@@ -72,6 +76,15 @@ pub struct SftpVfs {
 struct SshClient {
     host_port: String,
     known_hosts: Arc<Mutex<KnownHosts>>,
+    /// If set, the user has already confirmed this fingerprint for this
+    /// session and we should treat a `NewHost` outcome as accepted (and
+    /// record it) instead of refusing.
+    trust_on_match: Option<(String, String)>,
+    /// Side-channel used by [`SshClient::check_server_key`] to communicate
+    /// which fingerprint a `NewHost` rejection saw. The connector reads
+    /// this slot after a failed `client::connect` so the UI can prompt the
+    /// user.
+    pending_unknown: Arc<Mutex<Option<(String, String, String)>>>,
 }
 
 impl client::Handler for SshClient {
@@ -87,11 +100,30 @@ impl client::Handler for SshClient {
         match kh.check(&self.host_port, &algo, &fp) {
             CheckResult::Match => Ok(true),
             CheckResult::NewHost => {
-                if let Err(e) = kh.record(&self.host_port, &algo, &fp) {
-                    tracing::warn!("known_hosts write {}: {e}", self.host_port);
+                if let Some((trusted_algo, trusted_fp)) = &self.trust_on_match {
+                    if trusted_algo == &algo && trusted_fp == &fp {
+                        if let Err(e) = kh.record(&self.host_port, &algo, &fp) {
+                            tracing::warn!("known_hosts write {}: {e}", self.host_port);
+                        }
+                        tracing::info!(
+                            "known_hosts: recorded user-confirmed host {} ({fp})",
+                            self.host_port,
+                        );
+                        return Ok(true);
+                    }
+                    tracing::error!(
+                        "host-key changed between confirmation and connect for {}: \
+                         confirmed {trusted_fp}, server presented {fp}",
+                        self.host_port,
+                    );
                 }
-                tracing::info!("known_hosts: trusting new host {} ({fp})", self.host_port);
-                Ok(true)
+                // Unknown host and no user confirmation yet: refuse the
+                // connection and stash the fingerprint so the connector can
+                // surface it as Error::HostKeyUnknown.
+                if let Ok(mut slot) = self.pending_unknown.lock() {
+                    *slot = Some((self.host_port.clone(), algo, fp));
+                }
+                Ok(false)
             }
             CheckResult::Mismatch { recorded } => {
                 tracing::error!(
@@ -108,8 +140,7 @@ impl SftpVfs {
     /// Connect to `endpoint` and open an SFTP subsystem channel.
     /// Uses the default known_hosts file at `$XDG_CACHE_HOME/mc-rs/known_hosts`.
     pub async fn connect(scheme: &'static str, endpoint: SftpEndpoint) -> Result<Self> {
-        let known_hosts = KnownHosts::load(KnownHosts::default_path());
-        Self::connect_with_known_hosts(scheme, endpoint, Arc::new(Mutex::new(known_hosts))).await
+        Self::connect_inner(scheme, endpoint, None, None).await
     }
 
     /// Connect using an explicit password (UI-prompt path).
@@ -118,38 +149,22 @@ impl SftpVfs {
         endpoint: SftpEndpoint,
         password: &str,
     ) -> Result<Self> {
-        let known_hosts = Arc::new(Mutex::new(KnownHosts::load(KnownHosts::default_path())));
-        let host_port = format!("{}:{}", endpoint.host, endpoint.port);
-        let cfg = Arc::new(client::Config::default());
-        let handler = SshClient {
-            host_port: host_port.clone(),
-            known_hosts,
-        };
-        let mut handle = client::connect(cfg, (endpoint.host.as_str(), endpoint.port), handler)
-            .await
-            .map_err(|e| Error::Vfs(format!("ssh connect: {e}")))?;
-        match handle.authenticate_password(&endpoint.user, password).await {
-            Ok(res) if res.success() => {}
-            Ok(_) => return Err(Error::Vfs(format!("password auth failed for {host_port}"))),
-            Err(e) => return Err(Error::Vfs(format!("password auth error: {e}"))),
-        }
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| Error::Vfs(format!("ssh channel: {e}")))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| Error::Vfs(format!("sftp subsystem: {e}")))?;
-        let session = SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| Error::Vfs(format!("sftp init: {e}")))?;
-        Ok(Self {
-            scheme,
-            endpoint,
-            session,
-            _handle: handle,
-        })
+        Self::connect_inner(scheme, endpoint, Some(password.to_string()), None).await
+    }
+
+    /// Connect after the user has confirmed an unknown host fingerprint.
+    /// On success the fingerprint is appended to known_hosts. If the server
+    /// presents a *different* fingerprint than the one the user confirmed,
+    /// the connection is refused (defends against a swap-while-prompting
+    /// race).
+    pub async fn connect_trusting(
+        scheme: &'static str,
+        endpoint: SftpEndpoint,
+        algorithm: String,
+        fingerprint: String,
+        password: Option<String>,
+    ) -> Result<Self> {
+        Self::connect_inner(scheme, endpoint, password, Some((algorithm, fingerprint))).await
     }
 
     /// Connect with a caller-provided known_hosts store (useful for tests).
@@ -158,23 +173,71 @@ impl SftpVfs {
         endpoint: SftpEndpoint,
         known_hosts: Arc<Mutex<KnownHosts>>,
     ) -> Result<Self> {
+        Self::connect_with_known_hosts_inner(scheme, endpoint, known_hosts, None, None).await
+    }
+
+    async fn connect_inner(
+        scheme: &'static str,
+        endpoint: SftpEndpoint,
+        password: Option<String>,
+        trust_on_match: Option<(String, String)>,
+    ) -> Result<Self> {
+        let known_hosts = Arc::new(Mutex::new(KnownHosts::load(KnownHosts::default_path())));
+        Self::connect_with_known_hosts_inner(
+            scheme,
+            endpoint,
+            known_hosts,
+            password,
+            trust_on_match,
+        )
+        .await
+    }
+
+    async fn connect_with_known_hosts_inner(
+        scheme: &'static str,
+        endpoint: SftpEndpoint,
+        known_hosts: Arc<Mutex<KnownHosts>>,
+        password: Option<String>,
+        trust_on_match: Option<(String, String)>,
+    ) -> Result<Self> {
         let host_port = format!("{}:{}", endpoint.host, endpoint.port);
+        let pending_unknown: Arc<Mutex<Option<(String, String, String)>>> =
+            Arc::new(Mutex::new(None));
         let cfg = Arc::new(client::Config::default());
         let handler = SshClient {
-            host_port,
+            host_port: host_port.clone(),
             known_hosts,
+            trust_on_match,
+            pending_unknown: pending_unknown.clone(),
         };
-        let mut handle = client::connect(cfg, (endpoint.host.as_str(), endpoint.port), handler)
-            .await
-            .map_err(|e| Error::Vfs(format!("ssh connect: {e}")))?;
-
-        if !try_auth(&mut handle, &endpoint.user).await? {
+        let mut handle =
+            match client::connect(cfg, (endpoint.host.as_str(), endpoint.port), handler).await {
+                Ok(h) => h,
+                Err(e) => {
+                    if let Some((host, algo, fp)) =
+                        pending_unknown.lock().ok().and_then(|mut s| s.take())
+                    {
+                        return Err(Error::HostKeyUnknown {
+                            host_port: host,
+                            algorithm: algo,
+                            fingerprint: fp,
+                        });
+                    }
+                    return Err(Error::Vfs(format!("ssh connect: {e}")));
+                }
+            };
+        if let Some(pw) = &password {
+            match handle.authenticate_password(&endpoint.user, pw).await {
+                Ok(res) if res.success() => {}
+                Ok(_) => return Err(Error::Vfs(format!("password auth failed for {host_port}"))),
+                Err(e) => return Err(Error::Vfs(format!("password auth error: {e}"))),
+            }
+        } else if !try_auth(&mut handle, &endpoint.user).await? {
             return Err(Error::Vfs(format!(
                 "ssh authentication failed for {}@{} (no agent or matching key)",
                 endpoint.user, endpoint.host
             )));
         }
-
         let channel = handle
             .channel_open_session()
             .await
@@ -207,7 +270,11 @@ impl SftpVfs {
             .find(|l| l.scheme == self.scheme)
             .ok_or_else(|| Error::InvalidPath(format!("vpath has no {} layer", self.scheme)))?;
         let s = layer.sub.to_string_lossy();
-        let s = if s.is_empty() { "/".to_string() } else { s.into_owned() };
+        let s = if s.is_empty() {
+            "/".to_string()
+        } else {
+            s.into_owned()
+        };
         Ok(s)
     }
 }
@@ -261,12 +328,7 @@ async fn try_agent(handle: &mut client::Handle<SshClient>, user: &str) -> Result
     };
     for id in identities {
         match handle
-            .authenticate_publickey_with(
-                user,
-                id,
-                Some(russh::keys::HashAlg::Sha512),
-                &mut agent,
-            )
+            .authenticate_publickey_with(user, id, Some(russh::keys::HashAlg::Sha512), &mut agent)
             .await
         {
             Ok(res) if res.success() => return Ok(true),
@@ -301,7 +363,10 @@ async fn try_key_file(handle: &mut client::Handle<SshClient>, user: &str) -> Res
             Arc::new(key),
             Some(russh::keys::HashAlg::Sha512),
         );
-        match handle.authenticate_publickey(user, private_key_with_hash).await {
+        match handle
+            .authenticate_publickey(user, private_key_with_hash)
+            .await
+        {
             Ok(res) if res.success() => return Ok(true),
             Ok(_) => continue,
             Err(e) => {

@@ -10,11 +10,11 @@
 
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use super::DialogOutcome;
 use crate::theme::rtc;
@@ -270,7 +270,11 @@ impl MenuBar {
             w.min(area.width.saturating_sub(x.saturating_sub(area.x))),
             h.min(area.height),
         );
-        DropdownLayout { rect, max_label, max_hint }
+        DropdownLayout {
+            rect,
+            max_label,
+            max_hint,
+        }
     }
 
     /// Return the on-screen rect for the active section's dropdown.
@@ -283,7 +287,13 @@ impl MenuBar {
     /// `focused` is true the active section is highlighted (used while the
     /// menu has keyboard focus); otherwise titles are drawn in the chrome
     /// style.
-    pub fn render_titles(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme, focused: bool) {
+    pub fn render_titles(
+        &self,
+        f: &mut Frame<'_>,
+        area: Rect,
+        scheme: &ColorScheme,
+        focused: bool,
+    ) {
         let chrome = Style::default()
             .fg(rtc(scheme.buttonbar_label_fg))
             .bg(rtc(scheme.buttonbar_label_bg));
@@ -324,7 +334,11 @@ impl MenuBar {
 
         let section = &self.sections[self.active_section];
         let layout = self.dropdown_layout(area);
-        let DropdownLayout { rect: dropdown, max_label, max_hint } = layout;
+        let DropdownLayout {
+            rect: dropdown,
+            max_label,
+            max_hint,
+        } = layout;
 
         f.render_widget(Clear, dropdown);
         let block = Block::default()
@@ -344,7 +358,11 @@ impl MenuBar {
                     Line::from(Span::styled(bar, border))
                 }
                 MenuEntry::Item(it) => {
-                    let style = if i == self.active_item { dlg_focus } else { dlg };
+                    let style = if i == self.active_item {
+                        dlg_focus
+                    } else {
+                        dlg
+                    };
                     let label = format!(
                         " {:<lw$}  {:>hw$} ",
                         it.label,
@@ -393,10 +411,12 @@ impl MenuBar {
                 self.active_item = self.last_item_index(self.active_section);
                 DialogOutcome::None
             }
-            (KeyCode::Enter, _) => match &self.sections[self.active_section].entries[self.active_item] {
-                MenuEntry::Item(it) => DialogOutcome::Submitted(it.choice.clone()),
-                MenuEntry::Separator => DialogOutcome::None,
-            },
+            (KeyCode::Enter, _) => {
+                match &self.sections[self.active_section].entries[self.active_item] {
+                    MenuEntry::Item(it) => DialogOutcome::Submitted(it.choice.clone()),
+                    MenuEntry::Separator => DialogOutcome::None,
+                }
+            }
             (KeyCode::Char(c), m) if m.is_empty() || m == KeyMods::SHIFT => {
                 let want = c.to_ascii_lowercase();
                 if let Some(idx) = self
@@ -457,7 +477,10 @@ fn build_sections() -> Vec<Section> {
 }
 
 fn focus_then(left: bool, then: MenuChoice) -> MenuChoice {
-    MenuChoice::FocusThen { left, then: Box::new(then) }
+    MenuChoice::FocusThen {
+        left,
+        then: Box::new(then),
+    }
 }
 
 fn key(code: KeyCode) -> MenuChoice {
@@ -473,7 +496,11 @@ fn dlg(d: MenuDialog) -> MenuChoice {
 }
 
 fn item(label: &'static str, hint: &'static str, choice: MenuChoice) -> MenuEntry {
-    MenuEntry::Item(MenuItem { label, hint, choice })
+    MenuEntry::Item(MenuItem {
+        label,
+        hint,
+        choice,
+    })
 }
 
 fn sep() -> MenuEntry {
@@ -499,7 +526,11 @@ fn panel_section_entries(left: bool) -> Vec<MenuEntry> {
         ),
         sep(),
         item("Filter...", "", focus_then(left, dlg(MenuDialog::Filter))),
-        item("Encoding...", "", focus_then(left, dlg(MenuDialog::Encoding))),
+        item(
+            "Encoding...",
+            "",
+            focus_then(left, dlg(MenuDialog::Encoding)),
+        ),
         item(
             "Tree",
             "",
@@ -558,11 +589,7 @@ fn file_section_entries() -> Vec<MenuEntry> {
         ),
         item("Edit symlink", "", dlg(MenuDialog::EditSymlink)),
         sep(),
-        item(
-            "Quick cd",
-            "M-c",
-            key_mod(KeyCode::Char('c'), KeyMods::ALT),
-        ),
+        item("Quick cd", "M-c", key_mod(KeyCode::Char('c'), KeyMods::ALT)),
         item(
             "Select group",
             "+",
@@ -592,11 +619,7 @@ fn command_section_entries() -> Vec<MenuEntry> {
             "M-?",
             key_mod(KeyCode::Char('?'), KeyMods::ALT),
         ),
-        item(
-            "Find and panelize",
-            "",
-            dlg(MenuDialog::FindAndPanelize),
-        ),
+        item("Find and panelize", "", dlg(MenuDialog::FindAndPanelize)),
         item(
             "External panelize...",
             "",

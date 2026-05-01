@@ -11,6 +11,6 @@ pub mod ops;
 pub mod queue;
 pub mod trait_;
 
-pub use queue::{JobQueue, JobUpdateRx};
 pub use ops::{CopyJob, DeleteJob, MoveJob};
+pub use queue::{JobQueue, JobUpdateRx};
 pub use trait_::{Job, JobCtx, JobHandle, JobId, JobOutcome, JobUpdate, JobUpdateKind, Progress};

@@ -4,20 +4,32 @@
 
 use mc_config::{AppConfig, ColorScheme};
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 #[derive(Debug, Clone)]
 pub enum OptionField {
-    Bool { label: &'static str, value: bool, key: OptionKey },
-    Int { label: &'static str, value: u32, key: OptionKey },
-    Text { label: &'static str, value: String, key: OptionKey },
+    Bool {
+        label: &'static str,
+        value: bool,
+        key: OptionKey,
+    },
+    Int {
+        label: &'static str,
+        value: u32,
+        key: OptionKey,
+    },
+    Text {
+        label: &'static str,
+        value: String,
+        key: OptionKey,
+    },
 }
 
 /// Identifies which `AppConfig` field a row writes back to.
@@ -271,7 +283,9 @@ impl Dialog for OptionsDialog {
                     match fld {
                         OptionField::Text { value, .. } => value.push(c),
                         OptionField::Int { value, .. } if c.is_ascii_digit() => {
-                            *value = value.saturating_mul(10).saturating_add(c as u32 - '0' as u32);
+                            *value = value
+                                .saturating_mul(10)
+                                .saturating_add(c as u32 - '0' as u32);
                         }
                         _ => {}
                     }

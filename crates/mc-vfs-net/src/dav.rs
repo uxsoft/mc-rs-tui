@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mc_core::{Entry, EntryKind, Error, Result, VPath};
 use mc_vfs::trait_::{AsyncReader, Capabilities, Vfs};
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -39,10 +39,7 @@ impl DavEndpoint {
                 if prefix.starts_with("http://") || prefix.starts_with("https://") {
                     (None, decoded.clone())
                 } else {
-                    (
-                        Some(prefix.to_string()),
-                        decoded[at_idx + 1..].to_string(),
-                    )
+                    (Some(prefix.to_string()), decoded[at_idx + 1..].to_string())
                 }
             }
             None => (None, decoded.clone()),
@@ -53,8 +50,14 @@ impl DavEndpoint {
         } else {
             format!("https://{host_url}")
         };
-        let password = std::env::var("MC_RS_DAV_PASS").ok().filter(|s| !s.is_empty());
-        let user = user.or_else(|| std::env::var("MC_RS_DAV_USER").ok().filter(|s| !s.is_empty()));
+        let password = std::env::var("MC_RS_DAV_PASS")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let user = user.or_else(|| {
+            std::env::var("MC_RS_DAV_USER")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
         Ok(Self {
             base,
             user,
@@ -113,7 +116,9 @@ impl DavVfs {
     }
 
     fn auth(&self) -> Option<(String, Option<String>)> {
-        self.user.as_ref().map(|u| (u.clone(), self.password.clone()))
+        self.user
+            .as_ref()
+            .map(|u| (u.clone(), self.password.clone()))
     }
 }
 
@@ -131,7 +136,10 @@ impl Vfs for DavVfs {
         // PROPFIND Depth: 0 → single-entry response.
         let url = self.url_for(p)?;
         let mut headers = HeaderMap::new();
-        headers.insert(HeaderName::from_static("depth"), HeaderValue::from_static("0"));
+        headers.insert(
+            HeaderName::from_static("depth"),
+            HeaderValue::from_static("0"),
+        );
         let mut req = self
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
@@ -155,7 +163,10 @@ impl Vfs for DavVfs {
     async fn read_dir(&self, p: &VPath) -> Result<Vec<Entry>> {
         let url = self.url_for(p)?;
         let mut headers = HeaderMap::new();
-        headers.insert(HeaderName::from_static("depth"), HeaderValue::from_static("1"));
+        headers.insert(
+            HeaderName::from_static("depth"),
+            HeaderValue::from_static("1"),
+        );
         let mut req = self
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
@@ -188,7 +199,10 @@ impl Vfs for DavVfs {
             return Err(Error::Vfs(format!("dav get {url}: {}", resp.status())));
         }
         let bytes = resp.bytes().await.map_err(net_err)?;
-        Ok(Box::new(BytesReader { data: Arc::from(bytes.to_vec()), pos: 0 }))
+        Ok(Box::new(BytesReader {
+            data: Arc::from(bytes.to_vec()),
+            pos: 0,
+        }))
     }
 }
 
@@ -338,13 +352,68 @@ fn basename_of(href: &str, base: &str) -> String {
 }
 
 fn parse_http_date(s: Option<&str>) -> Option<std::time::SystemTime> {
-    // RFC 1123 date (e.g., "Tue, 15 Nov 1994 12:45:26 GMT"). We parse a tiny
-    // subset by hand to avoid pulling chrono.
-    let s = s?;
-    // Cheap approximation: just return now if we got *something*. A real
-    // implementation would parse the date.
-    let _ = s;
-    None
+    // RFC 1123 IMF-fixdate, e.g. "Tue, 15 Nov 1994 12:45:26 GMT".
+    // We don't pull chrono — a small hand-rolled parser covers what every
+    // real-world WebDAV server emits. Older RFC 850 and asctime forms are
+    // ignored (servers no longer emit them).
+    let s = s?.trim();
+    let comma = s.find(',')?;
+    let rest = s.get(comma + 1..)?.trim_start();
+    let mut parts = rest.split_whitespace();
+    let day: u32 = parts.next()?.parse().ok()?;
+    let month = parts.next()?;
+    let year: i32 = parts.next()?.parse().ok()?;
+    let hms = parts.next()?;
+    // Trailing "GMT" is required by RFC 9110; we don't support other zones.
+    if !matches!(parts.next(), Some(z) if z.eq_ignore_ascii_case("GMT")) {
+        return None;
+    }
+    let mut hms_parts = hms.split(':');
+    let h: u32 = hms_parts.next()?.parse().ok()?;
+    let m: u32 = hms_parts.next()?.parse().ok()?;
+    let sec: u32 = hms_parts.next()?.parse().ok()?;
+    let month_idx = match month {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let secs_since_epoch = days_from_civil(year, month_idx, day)? * 86_400
+        + i64::from(h) * 3600
+        + i64::from(m) * 60
+        + i64::from(sec);
+    if secs_since_epoch >= 0 {
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
+            u64::try_from(secs_since_epoch).ok()?,
+        ))
+    } else {
+        std::time::UNIX_EPOCH.checked_sub(std::time::Duration::from_secs(
+            u64::try_from(-secs_since_epoch).ok()?,
+        ))
+    }
+}
+
+/// Howard Hinnant's date algorithm: days from 1970-01-01 to the given Y-M-D.
+/// Negative results mean dates before the Unix epoch.
+fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * if m > 2 { m - 3 } else { m + 9 } + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(i64::from(era) * 146_097 + i64::from(doe) - 719_468)
 }
 
 struct BytesReader {
@@ -385,6 +454,21 @@ mod tests {
     fn parse_endpoint_with_user() {
         let e = DavEndpoint::parse("alice@https://dav.example.com/foo/").unwrap();
         assert_eq!(e.user.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn parse_rfc1123_date() {
+        // 1994-11-15 12:45:26 UTC = 784903526
+        let t = parse_http_date(Some("Tue, 15 Nov 1994 12:45:26 GMT")).unwrap();
+        let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(secs, 784_903_526);
+    }
+
+    #[test]
+    fn parse_rfc1123_rejects_bad() {
+        assert!(parse_http_date(None).is_none());
+        assert!(parse_http_date(Some("not a date")).is_none());
+        assert!(parse_http_date(Some("Tue, 15 Nov 1994 12:45:26 EDT")).is_none());
     }
 
     #[test]

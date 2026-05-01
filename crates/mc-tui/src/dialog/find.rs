@@ -1,13 +1,13 @@
 use mc_config::ColorScheme;
-use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use mc_core::VPath;
+use mc_core::key::{KeyChord, KeyCode, KeyMods};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 #[derive(Debug, Clone)]
@@ -90,24 +90,57 @@ impl Dialog for FindForm {
     fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(70, 13, area);
         f.render_widget(Clear, rect);
-        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
+        let dlg = Style::default()
+            .fg(rtc(scheme.dialog_fg))
+            .bg(rtc(scheme.dialog_bg));
         let block = Block::default()
             .title(Span::styled(
                 " Find file ",
-                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.dialog_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_border))
+                    .bg(rtc(scheme.dialog_bg)),
+            )
             .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
         let lines: Vec<Line> = vec![
-            field_line("Filename glob", &self.params.name_pattern, self.current_field() == Field::Name, scheme),
-            field_line("Content match", &self.params.content_pattern, self.current_field() == Field::Content, scheme),
-            field_line("Ignore dirs",   &self.params.ignore_dirs,    self.current_field() == Field::IgnoreDirs, scheme),
-            check_line("Case sensitive", self.params.case_sensitive, self.current_field() == Field::Case, scheme),
-            check_line("Whole word",     self.params.whole_word,     self.current_field() == Field::WholeWord, scheme),
+            field_line(
+                "Filename glob",
+                &self.params.name_pattern,
+                self.current_field() == Field::Name,
+                scheme,
+            ),
+            field_line(
+                "Content match",
+                &self.params.content_pattern,
+                self.current_field() == Field::Content,
+                scheme,
+            ),
+            field_line(
+                "Ignore dirs",
+                &self.params.ignore_dirs,
+                self.current_field() == Field::IgnoreDirs,
+                scheme,
+            ),
+            check_line(
+                "Case sensitive",
+                self.params.case_sensitive,
+                self.current_field() == Field::Case,
+                scheme,
+            ),
+            check_line(
+                "Whole word",
+                self.params.whole_word,
+                self.current_field() == Field::WholeWord,
+                scheme,
+            ),
             Line::from(""),
             Line::from("Tab: next field   Space: toggle   Enter: start   Esc: cancel"),
         ];
@@ -116,9 +149,7 @@ impl Dialog for FindForm {
 
     fn handle_key(&mut self, chord: KeyChord) -> DialogOutcome<FindFormOutcome> {
         match (chord.code, chord.mods) {
-            (KeyCode::Escape, _) => {
-                DialogOutcome::Submitted(FindFormOutcome::Cancel)
-            }
+            (KeyCode::Escape, _) => DialogOutcome::Submitted(FindFormOutcome::Cancel),
             (KeyCode::Enter, _) => {
                 DialogOutcome::Submitted(FindFormOutcome::Start(self.params.clone()))
             }
@@ -159,11 +190,21 @@ impl Dialog for FindForm {
     }
 }
 
-fn field_line(label: &'static str, value: &str, active: bool, scheme: &ColorScheme) -> Line<'static> {
+fn field_line(
+    label: &'static str,
+    value: &str,
+    active: bool,
+    scheme: &ColorScheme,
+) -> Line<'static> {
     let style = if active {
-        Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(rtc(scheme.dialog_focus_fg))
+            .bg(rtc(scheme.dialog_focus_bg))
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(rtc(scheme.input_fg)).bg(rtc(scheme.input_bg))
+        Style::default()
+            .fg(rtc(scheme.input_fg))
+            .bg(rtc(scheme.input_bg))
     };
     Line::from(vec![
         Span::raw(format!("{:<14} ", label)),
@@ -171,11 +212,21 @@ fn field_line(label: &'static str, value: &str, active: bool, scheme: &ColorSche
     ])
 }
 
-fn check_line(label: &'static str, value: bool, active: bool, scheme: &ColorScheme) -> Line<'static> {
+fn check_line(
+    label: &'static str,
+    value: bool,
+    active: bool,
+    scheme: &ColorScheme,
+) -> Line<'static> {
     let style = if active {
-        Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(rtc(scheme.dialog_focus_fg))
+            .bg(rtc(scheme.dialog_focus_bg))
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg))
+        Style::default()
+            .fg(rtc(scheme.dialog_fg))
+            .bg(rtc(scheme.dialog_bg))
     };
     let mark = if value { "[x]" } else { "[ ]" };
     Line::from(vec![
@@ -234,15 +285,23 @@ impl Dialog for FindResults {
     fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(80, 22, area);
         f.render_widget(Clear, rect);
-        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
+        let dlg = Style::default()
+            .fg(rtc(scheme.dialog_fg))
+            .bg(rtc(scheme.dialog_bg));
         let title = format!(" Find results — {} ", self.query_summary);
         let block = Block::default()
             .title(Span::styled(
                 title,
-                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.dialog_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_border))
+                    .bg(rtc(scheme.dialog_bg)),
+            )
             .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
@@ -265,7 +324,10 @@ impl Dialog for FindResults {
             .take(height)
             .map(|(i, p)| {
                 let style = if i == self.cursor {
-                    Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(rtc(scheme.dialog_focus_fg))
+                        .bg(rtc(scheme.dialog_focus_bg))
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     dlg
                 };
@@ -279,13 +341,12 @@ impl Dialog for FindResults {
         } else {
             format!("{} (so far {} matches)", self.status, self.items.len())
         };
-        f.render_widget(
-            Paragraph::new(Line::from(status)).style(dlg),
-            layout[1],
-        );
+        f.render_widget(Paragraph::new(Line::from(status)).style(dlg), layout[1]);
         f.render_widget(
             Paragraph::new(Line::from("Enter: cd    P: panelize    Esc: close")).style(
-                Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg)),
+                Style::default()
+                    .fg(rtc(scheme.panel_dim_fg))
+                    .bg(rtc(scheme.dialog_bg)),
             ),
             layout[2],
         );

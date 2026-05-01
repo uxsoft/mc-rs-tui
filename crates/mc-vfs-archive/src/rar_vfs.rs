@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use mc_core::{Entry, EntryKind, Error, Result, VPath};
 use mc_vfs::trait_::{AsyncReader, Capabilities, Vfs};
 
+use crate::safe_archive_key;
 use crate::tar_vfs::AsyncSliceReader;
 
 #[derive(Debug, Clone)]
@@ -42,7 +43,21 @@ impl RarVfs {
                 None => break,
             };
             let name = header.entry().filename.to_string_lossy().to_string();
-            let key = normalize_key(&name);
+            // RAR uses backslashes on Windows-built archives; normalise first.
+            let name_norm = name.replace('\\', "/");
+            let Some(key) = safe_archive_key(&name_norm) else {
+                tracing::warn!("rar: skipping traversal entry {name:?}");
+                archive = header
+                    .skip()
+                    .map_err(|e| Error::Vfs(format!("rar skip: {e}")))?;
+                continue;
+            };
+            if key == "/" {
+                archive = header
+                    .skip()
+                    .map_err(|e| Error::Vfs(format!("rar skip: {e}")))?;
+                continue;
+            }
             let is_dir = header.entry().is_directory();
             let size = header.entry().unpacked_size as u64;
             let kind = if is_dir {
@@ -92,19 +107,9 @@ impl RarVfs {
             .rev()
             .find(|l| l.scheme == self.scheme)
             .ok_or_else(|| Error::InvalidPath(format!("vpath has no {} layer", self.scheme)))?;
-        Ok(normalize_key(&layer.sub.to_string_lossy()))
-    }
-}
-
-fn normalize_key(s: &str) -> String {
-    let trimmed = s.trim_end_matches('/').replace('\\', "/");
-    if trimmed.is_empty() {
-        return "/".to_string();
-    }
-    if trimmed.starts_with('/') {
-        trimmed
-    } else {
-        format!("/{trimmed}")
+        let normalized = layer.sub.to_string_lossy().replace('\\', "/");
+        safe_archive_key(&normalized)
+            .ok_or_else(|| Error::InvalidPath(format!("path traversal in {p}")))
     }
 }
 

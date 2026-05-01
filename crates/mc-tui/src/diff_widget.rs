@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use mc_diff::{DiffModel, Row};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use crate::theme::rtc;
 
@@ -55,8 +55,7 @@ impl DiffWidget {
                 self.cursor = self.cursor.saturating_sub(1);
             }
             KeyCode::PageDown | KeyCode::Char(' ') => {
-                self.cursor =
-                    (self.cursor + 20).min(self.model.rows.len().saturating_sub(1));
+                self.cursor = (self.cursor + 20).min(self.model.rows.len().saturating_sub(1));
             }
             KeyCode::PageUp | KeyCode::Backspace => {
                 self.cursor = self.cursor.saturating_sub(20);
@@ -80,7 +79,9 @@ impl DiffWidget {
 
     pub fn render(&mut self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         f.render_widget(Clear, area);
-        let panel = Style::default().fg(rtc(scheme.panel_fg)).bg(rtc(scheme.panel_bg));
+        let panel = Style::default()
+            .fg(rtc(scheme.panel_fg))
+            .bg(rtc(scheme.panel_bg));
         let title = format!(
             " Diff [{} hunks]   {} | {} ",
             self.model.hunks.len(),
@@ -90,10 +91,16 @@ impl DiffWidget {
         let block = Block::default()
             .title(Span::styled(
                 title,
-                Style::default().fg(rtc(scheme.panel_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.panel_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.panel_border)).bg(rtc(scheme.panel_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.panel_border))
+                    .bg(rtc(scheme.panel_bg)),
+            )
             .style(panel);
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -131,7 +138,11 @@ impl DiffWidget {
             Span::raw(": close"),
         ]);
         f.render_widget(
-            Paragraph::new(hint_line).style(Style::default().fg(rtc(scheme.statusbar_fg)).bg(rtc(scheme.statusbar_bg))),
+            Paragraph::new(hint_line).style(
+                Style::default()
+                    .fg(rtc(scheme.statusbar_fg))
+                    .bg(rtc(scheme.statusbar_bg)),
+            ),
             hint,
         );
     }
@@ -142,11 +153,21 @@ impl DiffWidget {
         height: usize,
         scheme: &ColorScheme,
     ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-        let panel = Style::default().fg(rtc(scheme.panel_fg)).bg(rtc(scheme.panel_bg));
-        let muted = Style::default().fg(rtc(scheme.muted_fg)).bg(rtc(scheme.panel_bg));
-        let add = Style::default().fg(rtc(scheme.diff_add_fg)).bg(rtc(scheme.diff_add_bg));
-        let del = Style::default().fg(rtc(scheme.diff_del_fg)).bg(rtc(scheme.diff_del_bg));
-        let focus = Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg));
+        let panel = Style::default()
+            .fg(rtc(scheme.panel_fg))
+            .bg(rtc(scheme.panel_bg));
+        let muted = Style::default()
+            .fg(rtc(scheme.muted_fg))
+            .bg(rtc(scheme.panel_bg));
+        let add = Style::default()
+            .fg(rtc(scheme.diff_add_fg))
+            .bg(rtc(scheme.diff_add_bg));
+        let del = Style::default()
+            .fg(rtc(scheme.diff_del_fg))
+            .bg(rtc(scheme.diff_del_bg));
+        let focus = Style::default()
+            .fg(rtc(scheme.dialog_focus_fg))
+            .bg(rtc(scheme.dialog_focus_bg));
 
         let mut left = Vec::with_capacity(height);
         let mut right = Vec::with_capacity(height);
@@ -160,15 +181,33 @@ impl DiffWidget {
                     (Span::styled(trim_nl(s), st), Span::styled(trim_nl(s), st))
                 }
                 Row::Removed(s) => {
-                    let cur = if cursor { del.add_modifier(Modifier::BOLD) } else { del };
-                    (Span::styled(trim_nl(s), cur), Span::styled(String::new(), muted))
+                    let cur = if cursor {
+                        del.add_modifier(Modifier::BOLD)
+                    } else {
+                        del
+                    };
+                    (
+                        Span::styled(trim_nl(s), cur),
+                        Span::styled(String::new(), muted),
+                    )
                 }
                 Row::Added(s) => {
-                    let cur = if cursor { add.add_modifier(Modifier::BOLD) } else { add };
-                    (Span::styled(String::new(), muted), Span::styled(trim_nl(s), cur))
+                    let cur = if cursor {
+                        add.add_modifier(Modifier::BOLD)
+                    } else {
+                        add
+                    };
+                    (
+                        Span::styled(String::new(), muted),
+                        Span::styled(trim_nl(s), cur),
+                    )
                 }
                 Row::Changed(l, r) => {
-                    let st = if cursor { focus.add_modifier(Modifier::BOLD) } else { focus };
+                    let st = if cursor {
+                        focus.add_modifier(Modifier::BOLD)
+                    } else {
+                        focus
+                    };
                     (Span::styled(trim_nl(l), st), Span::styled(trim_nl(r), st))
                 }
             };

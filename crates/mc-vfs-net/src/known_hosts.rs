@@ -47,10 +47,8 @@ impl KnownHosts {
     pub fn default_path() -> PathBuf {
         let cache = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache"))
-            })
-            .unwrap_or_else(|| PathBuf::from("."));
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+            .unwrap_or_else(std::env::temp_dir);
         cache.join("mc-rs").join("known_hosts")
     }
 
@@ -69,8 +67,14 @@ impl KnownHosts {
         CheckResult::NewHost
     }
 
-    pub fn record(&mut self, host_port: &str, algorithm: &str, fingerprint: &str) -> std::io::Result<()> {
-        self.entries.retain(|e| !(e.host_port == host_port && e.algorithm == algorithm));
+    pub fn record(
+        &mut self,
+        host_port: &str,
+        algorithm: &str,
+        fingerprint: &str,
+    ) -> std::io::Result<()> {
+        self.entries
+            .retain(|e| !(e.host_port == host_port && e.algorithm == algorithm));
         self.entries.push(Entry {
             host_port: host_port.to_string(),
             algorithm: algorithm.to_string(),
@@ -124,10 +128,32 @@ fn write_file(path: &Path, entries: &[Entry]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut f = std::fs::File::create(path)?;
-    writeln!(f, "# mc-rs known_hosts (TOFU)")?;
+    let mut buf: Vec<u8> = Vec::new();
+    writeln!(buf, "# mc-rs known_hosts (TOFU)")?;
     for e in entries {
-        writeln!(f, "{} {} {}", e.host_port, e.algorithm, e.fingerprint)?;
+        writeln!(buf, "{} {} {}", e.host_port, e.algorithm, e.fingerprint)?;
+    }
+    // Atomic write + owner-only perms so a hostile co-tenant on a shared
+    // machine cannot tamper with our recorded fingerprints (which would
+    // enable a silent MITM on the next connection).
+    let tmp = {
+        let mut s = path.as_os_str().to_owned();
+        s.push(".tmp");
+        PathBuf::from(s)
+    };
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     Ok(())
 }

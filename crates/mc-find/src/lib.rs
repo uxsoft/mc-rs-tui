@@ -78,7 +78,7 @@ async fn walk(
         if entry.name == "." || entry.name == ".." {
             continue;
         }
-        let child = match child_of(&q.start, &entry.name) {
+        let child = match q.start.child(&entry.name) {
             Some(c) => c,
             None => continue,
         };
@@ -87,8 +87,7 @@ async fn walk(
         if entry.is_dir() {
             // Apply ignore-dirs filter.
             let n_lower = entry.name.to_ascii_lowercase();
-            if q
-                .ignore_dirs
+            if q.ignore_dirs
                 .iter()
                 .any(|d| n_lower == d.to_ascii_lowercase())
             {
@@ -121,10 +120,7 @@ async fn walk(
             None
         };
         if tx
-            .send(FindEvent::Matched(Match {
-                path: child,
-                line,
-            }))
+            .send(FindEvent::Matched(Match { path: child, line }))
             .await
             .is_err()
         {
@@ -173,16 +169,6 @@ async fn scan_content(
     } else {
         Ok(None)
     }
-}
-
-fn child_of(parent: &VPath, name: &str) -> Option<VPath> {
-    let layer = parent.last().cloned()?;
-    let mut new_layer = layer;
-    new_layer.sub.push(name);
-    let mut new = parent.clone();
-    new.pop_layer();
-    new.push_layer(new_layer);
-    Some(new)
 }
 
 /// Build a case-insensitive [`globset::GlobMatcher`] from a user pattern.

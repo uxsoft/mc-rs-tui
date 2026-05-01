@@ -9,15 +9,9 @@ pub use r#move::MoveJob;
 use mc_core::{Error, VPath};
 
 /// Append a single path component to a [`VPath`]'s last layer.
+/// Wrapper around [`VPath::child`] that returns the rich job-side error.
 pub(crate) fn child_of(parent: &VPath, name: &str) -> Result<VPath, Error> {
-    let layer = parent
-        .last()
-        .cloned()
-        .ok_or_else(|| Error::InvalidPath("empty vpath".into()))?;
-    let mut new_layer = layer;
-    new_layer.sub.push(name);
-    let mut new = parent.clone();
-    new.pop_layer();
-    new.push_layer(new_layer);
-    Ok(new)
+    parent
+        .child(name)
+        .ok_or_else(|| Error::InvalidPath(format!("invalid child name {name:?}")))
 }

@@ -36,13 +36,19 @@ impl Registry {
     }
 
     /// Register a per-mount backend keyed by `(scheme, location)`.
-    pub fn register_mount(&mut self, scheme: impl Into<String>, location: impl Into<String>, vfs: Arc<dyn Vfs>) {
+    pub fn register_mount(
+        &mut self,
+        scheme: impl Into<String>,
+        location: impl Into<String>,
+        vfs: Arc<dyn Vfs>,
+    ) {
         self.by_pair.insert((scheme.into(), location.into()), vfs);
     }
 
     /// Forget a per-mount backend.
     pub fn unregister_mount(&mut self, scheme: &str, location: &str) {
-        self.by_pair.remove(&(scheme.to_string(), location.to_string()));
+        self.by_pair
+            .remove(&(scheme.to_string(), location.to_string()));
     }
 
     /// Snapshot of all per-(scheme, location) mounts. The order is

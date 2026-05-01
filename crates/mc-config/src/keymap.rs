@@ -70,12 +70,7 @@ impl Keymap {
     }
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        let cfg = match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str::<KeymapFile>(&s)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => KeymapFile::default(),
-            Err(e) => return Err(e),
-        };
+        let cfg: KeymapFile = crate::io::load_toml_or_default(path)?;
         Ok(Self::from_file(&cfg))
     }
 }

@@ -4,13 +4,13 @@
 
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 #[derive(Debug, Clone)]
@@ -31,7 +31,11 @@ impl VfsListDialog {
     #[must_use]
     pub fn new(mut mounts: Vec<(String, String)>) -> Self {
         mounts.sort();
-        Self { mounts, cursor: 0, view_offset: 0 }
+        Self {
+            mounts,
+            cursor: 0,
+            view_offset: 0,
+        }
     }
 }
 
@@ -95,10 +99,7 @@ impl Dialog for VfsListDialog {
         };
         f.render_widget(Paragraph::new(lines).style(dlg), body);
         f.render_widget(
-            Paragraph::new(Line::from(
-                "Enter: cd    Del/F8: free    Esc: close",
-            ))
-            .style(
+            Paragraph::new(Line::from("Enter: cd    Del/F8: free    Esc: close")).style(
                 Style::default()
                     .fg(rtc(scheme.panel_dim_fg))
                     .bg(rtc(scheme.dialog_bg)),
@@ -131,14 +132,20 @@ impl Dialog for VfsListDialog {
             }
             KeyCode::Delete | KeyCode::F(8) => {
                 if let Some((s, l)) = self.mounts.get(self.cursor).cloned() {
-                    DialogOutcome::Submitted(VfsListAction::Free { scheme: s, location: l })
+                    DialogOutcome::Submitted(VfsListAction::Free {
+                        scheme: s,
+                        location: l,
+                    })
                 } else {
                     DialogOutcome::None
                 }
             }
             KeyCode::Enter => {
                 if let Some((s, l)) = self.mounts.get(self.cursor).cloned() {
-                    DialogOutcome::Submitted(VfsListAction::Goto { scheme: s, location: l })
+                    DialogOutcome::Submitted(VfsListAction::Goto {
+                        scheme: s,
+                        location: l,
+                    })
                 } else {
                     DialogOutcome::None
                 }

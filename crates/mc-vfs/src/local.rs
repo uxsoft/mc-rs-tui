@@ -167,7 +167,10 @@ impl Vfs for LocalVfs {
     async fn open_write(&self, p: &VPath, opts: WriteOpts) -> Result<AsyncWriter> {
         let path = local_path(p)?;
         let mut o = fs::OpenOptions::new();
-        o.write(true).create(opts.create).truncate(opts.truncate).append(opts.append);
+        o.write(true)
+            .create(opts.create)
+            .truncate(opts.truncate)
+            .append(opts.append);
         let f = o.open(&path).await?;
         Ok(Box::new(f))
     }

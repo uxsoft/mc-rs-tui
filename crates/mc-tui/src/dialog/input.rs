@@ -1,12 +1,12 @@
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 pub struct InputDialog {
@@ -27,7 +27,11 @@ pub struct InputDialog {
 
 impl InputDialog {
     #[must_use]
-    pub fn new(title: impl Into<String>, prompt: impl Into<String>, initial: impl Into<String>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        initial: impl Into<String>,
+    ) -> Self {
         let value = initial.into();
         let cursor = value.chars().count();
         Self {
@@ -96,11 +100,21 @@ impl Dialog for InputDialog {
         let block = Block::default()
             .title(ratatui::text::Span::styled(
                 self.title.clone(),
-                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.dialog_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
-            .style(Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg)));
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_border))
+                    .bg(rtc(scheme.dialog_bg)),
+            )
+            .style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_fg))
+                    .bg(rtc(scheme.dialog_bg)),
+            );
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
@@ -116,7 +130,10 @@ impl Dialog for InputDialog {
         f.render_widget(body, inner);
 
         // Draw cursor.
-        let cur_x = inner.x + u16::try_from(self.cursor).unwrap_or(0).min(inner.width.saturating_sub(1));
+        let cur_x = inner.x
+            + u16::try_from(self.cursor)
+                .unwrap_or(0)
+                .min(inner.width.saturating_sub(1));
         let cur_y = inner.y + 1;
         f.set_cursor_position((cur_x, cur_y));
     }

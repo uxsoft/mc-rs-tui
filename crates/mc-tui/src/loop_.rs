@@ -8,16 +8,16 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
 use mc_core::VPath;
 use mc_find::{FindEvent, Query};
 use mc_jobs::{CopyJob, DeleteJob, JobUpdateRx, MoveJob};
-use tokio_util::sync::CancellationToken;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, Disposition, PendingOp};
 use crate::editor_spawn::{resolve_editor, spawn_editor};
@@ -45,14 +45,24 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if self.active {
-            let _ = execute!(
-                io::stdout(),
-                DisableMouseCapture,
-                DisableBracketedPaste,
-                LeaveAlternateScreen
-            );
-            let _ = disable_raw_mode();
+        if !self.active {
+            return;
+        }
+        if let Err(e) = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        ) {
+            // Log + stderr — the tracing layer may itself be torn down at this
+            // point (typical for panics), so a bare eprintln is a useful belt
+            // for the suspenders.
+            tracing::error!("TerminalGuard cleanup failed: {e}");
+            eprintln!("[mc-rs] terminal cleanup failed: {e}");
+        }
+        if let Err(e) = disable_raw_mode() {
+            tracing::error!("disable_raw_mode failed: {e}");
+            eprintln!("[mc-rs] disable_raw_mode failed: {e}");
         }
     }
 }
@@ -90,7 +100,7 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
     let mut find: Option<FindStream> = None;
     let mut watcher = PanelWatcher::new();
     let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    rearm_watcher(&app, &mut watcher, &watch_tx);
+    rearm_watcher(&app, &mut watcher, &watch_tx, &mut watch_rx);
     let mut redraw = true;
 
     loop {
@@ -108,7 +118,7 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
                             let disp = app.handle_key(chord);
                             match apply_disposition(
                                 disp, &mut app, &mut terminal, &mut find,
-                                &mut watcher, &watch_tx,
+                                &mut watcher, &watch_tx, &mut watch_rx,
                             ).await {
                                 LoopOutcome::Break => break,
                                 LoopOutcome::Continue { redraw: r } => redraw |= r,
@@ -131,7 +141,7 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
                             let disp = app.handle_mouse(ev);
                             match apply_disposition(
                                 disp, &mut app, &mut terminal, &mut find,
-                                &mut watcher, &watch_tx,
+                                &mut watcher, &watch_tx, &mut watch_rx,
                             ).await {
                                 LoopOutcome::Break => break,
                                 LoopOutcome::Continue { redraw: r } => redraw |= r,
@@ -187,7 +197,11 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
     }
 
     let final_cwd = {
-        let cwd = if app.active_left { &app.left.cwd } else { &app.right.cwd };
+        let cwd = if app.active_left {
+            &app.left.cwd
+        } else {
+            &app.right.cwd
+        };
         cwd.last().and_then(|l| {
             if l.scheme == "local" {
                 Some(l.sub.clone())
@@ -203,21 +217,34 @@ fn rearm_watcher(
     app: &App,
     watcher: &mut PanelWatcher,
     tx: &tokio::sync::mpsc::UnboundedSender<()>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
-    let cwd = if app.active_left { &app.left.cwd } else { &app.right.cwd };
+    let cwd = if app.active_left {
+        &app.left.cwd
+    } else {
+        &app.right.cwd
+    };
     let layer = match cwd.last() {
         Some(l) => l,
         None => return,
     };
     if layer.scheme != "local" {
         watcher.shutdown();
-        return;
+    } else {
+        watcher.watch(&layer.sub, tx.clone());
     }
-    watcher.watch(&layer.sub, tx.clone());
+    // Drain any stale events queued by the previous watcher before its
+    // callback was dropped — otherwise a notification from the directory
+    // we just left would trigger a redundant refresh of the new directory.
+    while rx.try_recv().is_ok() {}
 }
 
 fn update_title(app: &App) {
-    let cwd = if app.active_left { &app.left.cwd } else { &app.right.cwd };
+    let cwd = if app.active_left {
+        &app.left.cwd
+    } else {
+        &app.right.cwd
+    };
     let title = format!("mc-rs: {cwd}");
     let _ = execute!(io::stdout(), SetTitle(title));
 }
@@ -230,7 +257,7 @@ fn run_shell_command(cwd: &std::path::Path, cmd: &str) -> anyhow::Result<()> {
 
     use crossterm::execute;
     use crossterm::terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
 
     execute!(io::stdout(), LeaveAlternateScreen)?;
@@ -280,6 +307,7 @@ async fn apply_disposition<B: ratatui::backend::Backend>(
     find: &mut Option<FindStream>,
     watcher: &mut PanelWatcher,
     watch_tx: &tokio::sync::mpsc::UnboundedSender<()>,
+    watch_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> LoopOutcome {
     match disp {
         Disposition::Quit => LoopOutcome::Break,
@@ -289,14 +317,14 @@ async fn apply_disposition<B: ratatui::backend::Backend>(
             app.ensure_remote_mount().await;
             app.refresh_active().await;
             update_title(app);
-            rearm_watcher(app, watcher, watch_tx);
+            rearm_watcher(app, watcher, watch_tx, watch_rx);
             LoopOutcome::Continue { redraw: true }
         }
         Disposition::ReloadBoth => {
             app.ensure_remote_mount().await;
             app.refresh_both().await;
             update_title(app);
-            rearm_watcher(app, watcher, watch_tx);
+            rearm_watcher(app, watcher, watch_tx, watch_rx);
             LoopOutcome::Continue { redraw: true }
         }
         Disposition::RebuildTree => {
@@ -310,7 +338,7 @@ async fn apply_disposition<B: ratatui::backend::Backend>(
         Disposition::RunOp(op) => {
             run_op(app, terminal, op, find).await;
             update_title(app);
-            rearm_watcher(app, watcher, watch_tx);
+            rearm_watcher(app, watcher, watch_tx, watch_rx);
             LoopOutcome::Continue { redraw: true }
         }
     }
@@ -331,7 +359,7 @@ async fn run_op<B: ratatui::backend::Backend>(
                     return;
                 }
             };
-            let target = match build_child(&in_dir, &name) {
+            let target = match VPath::child(&in_dir, &name) {
                 Some(t) => t,
                 None => return,
             };
@@ -352,7 +380,7 @@ async fn run_op<B: ratatui::backend::Backend>(
                 Some(p) => p,
                 None => return,
             };
-            let dst = match build_child(&parent, &new_name) {
+            let dst = match VPath::child(&parent, &new_name) {
                 Some(t) => t,
                 None => return,
             };
@@ -395,10 +423,7 @@ async fn run_op<B: ratatui::backend::Backend>(
             app.show_progress(handle, desc);
         }
         PendingOp::SubmitDelete { targets } => {
-            let vfs = match targets
-                .first()
-                .and_then(|t| app.registry.root_for(t).ok())
-            {
+            let vfs = match targets.first().and_then(|t| app.registry.root_for(t).ok()) {
                 Some(v) => v,
                 None => return,
             };
@@ -476,43 +501,108 @@ async fn run_op<B: ratatui::backend::Backend>(
             let cancel = CancellationToken::new();
             let panelize = params.panelize;
             let rx = mc_find::run(vfs, q, cancel.clone());
-            *find = Some(FindStream { rx, cancel, panelize });
+            *find = Some(FindStream {
+                rx,
+                cancel,
+                panelize,
+            });
         }
-        PendingOp::RetryRemoteWithPassword { scheme, location, password } => {
-            match scheme.as_str() {
-                "sftp" => {
-                    if let Ok(endpoint) = mc_vfs_net::sftp::SftpEndpoint::parse(&location) {
-                        match mc_vfs_net::SftpVfs::connect_with_password("sftp", endpoint, &password)
-                            .await
-                        {
-                            Ok(vfs) => {
-                                app.registry.register_mount("sftp", location.clone(), std::sync::Arc::new(vfs));
-                                app.set_status(format!("connected to sftp://{location}"));
-                                app.refresh_active().await;
-                            }
-                            Err(e) => {
-                                tracing::warn!("sftp password retry {location}: {e}");
-                                app.set_status(format!("auth failed: {e}"));
-                            }
+        PendingOp::RetryRemoteWithPassword {
+            scheme,
+            location,
+            password,
+        } => match scheme.as_str() {
+            "sftp" => {
+                if let Ok(endpoint) = mc_vfs_net::sftp::SftpEndpoint::parse(&location) {
+                    match mc_vfs_net::SftpVfs::connect_with_password("sftp", endpoint, &password)
+                        .await
+                    {
+                        Ok(vfs) => {
+                            app.registry.register_mount(
+                                "sftp",
+                                location.clone(),
+                                std::sync::Arc::new(vfs),
+                            );
+                            app.set_status(format!("connected to sftp://{location}"));
+                            app.refresh_active().await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("sftp password retry {location}: {e}");
+                            app.set_status(format!("auth failed: {e}"));
                         }
                     }
                 }
-                "ftp" => {
-                    if let Ok(endpoint) = mc_vfs_net::ftp::FtpEndpoint::parse(&location) {
-                        match mc_vfs_net::FtpVfs::connect_with_password("ftp", endpoint, &password).await {
-                            Ok(vfs) => {
-                                app.registry.register_mount("ftp", location.clone(), std::sync::Arc::new(vfs));
-                                app.set_status(format!("connected to ftp://{location}"));
-                                app.refresh_active().await;
-                            }
-                            Err(e) => {
-                                tracing::warn!("ftp password retry {location}: {e}");
-                                app.set_status(format!("auth failed: {e}"));
-                            }
+            }
+            "ftp" => {
+                if let Ok(endpoint) = mc_vfs_net::ftp::FtpEndpoint::parse(&location) {
+                    match mc_vfs_net::FtpVfs::connect_with_password("ftp", endpoint, &password)
+                        .await
+                    {
+                        Ok(vfs) => {
+                            app.registry.register_mount(
+                                "ftp",
+                                location.clone(),
+                                std::sync::Arc::new(vfs),
+                            );
+                            app.set_status(format!("connected to ftp://{location}"));
+                            app.refresh_active().await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("ftp password retry {location}: {e}");
+                            app.set_status(format!("auth failed: {e}"));
                         }
                     }
                 }
-                _ => {}
+            }
+            _ => {}
+        },
+        PendingOp::AcceptHostKeyAndRetry {
+            scheme,
+            location,
+            algorithm,
+            fingerprint,
+        } => {
+            if scheme != "sftp" {
+                app.set_status(format!("host-key trust not supported for scheme {scheme}"));
+                return;
+            }
+            let endpoint = match mc_vfs_net::sftp::SftpEndpoint::parse(&location) {
+                Ok(e) => e,
+                Err(e) => {
+                    app.set_status(format!("bad sftp location: {e}"));
+                    return;
+                }
+            };
+            match mc_vfs_net::SftpVfs::connect_trusting(
+                "sftp",
+                endpoint,
+                algorithm,
+                fingerprint,
+                None,
+            )
+            .await
+            {
+                Ok(vfs) => {
+                    app.registry
+                        .register_mount("sftp", location.clone(), std::sync::Arc::new(vfs));
+                    app.set_status(format!("connected to sftp://{location}"));
+                    app.refresh_active().await;
+                }
+                Err(mc_core::Error::HostKeyUnknown { .. }) => {
+                    // Server presented a different fingerprint than the user
+                    // confirmed — refuse outright (don't loop).
+                    app.set_status(format!(
+                        "host key changed for {location}; refusing connection"
+                    ));
+                }
+                Err(mc_core::Error::Vfs(msg)) if msg.contains("auth") => {
+                    // Auth failure after host accepted: prompt for a password.
+                    app.prompt_password("sftp".into(), location);
+                }
+                Err(e) => {
+                    tracing::warn!("sftp accept-host retry {location}: {e}");
+                    app.set_status(format!("connect failed: {e}"));
+                }
             }
         }
         PendingOp::DropToShell { cwd } => {
@@ -553,7 +643,7 @@ async fn run_op<B: ratatui::backend::Backend>(
         PendingOp::Chown { targets, uid, gid } => {
             #[cfg(unix)]
             {
-                use nix::unistd::{chown, Gid, Uid};
+                use nix::unistd::{Gid, Uid, chown};
                 for t in targets {
                     let Some(local) = crate::app::vpath_to_local(&t) else {
                         app.set_status("chown: remote not supported");
@@ -580,7 +670,11 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             app.refresh_active().await;
         }
-        PendingOp::Symlink { target, link, relative } => {
+        PendingOp::Symlink {
+            target,
+            link,
+            relative,
+        } => {
             #[cfg(unix)]
             {
                 let actual = if relative {
@@ -742,7 +836,10 @@ fn pick_src_dst(
     app: &App,
     src_example: Option<&VPath>,
     dst_dir: &VPath,
-) -> Option<(std::sync::Arc<dyn mc_vfs::Vfs>, std::sync::Arc<dyn mc_vfs::Vfs>)> {
+) -> Option<(
+    std::sync::Arc<dyn mc_vfs::Vfs>,
+    std::sync::Arc<dyn mc_vfs::Vfs>,
+)> {
     let src = src_example?;
     let src_vfs = match app.registry.root_for(src) {
         Ok(v) => v,
@@ -770,16 +867,6 @@ fn parent_of(p: &VPath) -> Option<VPath> {
     let mut new_layer = last;
     new_layer.sub = sub;
     let mut new = p.clone();
-    new.pop_layer();
-    new.push_layer(new_layer);
-    Some(new)
-}
-
-fn build_child(parent: &VPath, name: &str) -> Option<VPath> {
-    let layer = parent.last().cloned()?;
-    let mut new_layer = layer;
-    new_layer.sub.push(name);
-    let mut new = parent.clone();
     new.pop_layer();
     new.push_layer(new_layer);
     Some(new)

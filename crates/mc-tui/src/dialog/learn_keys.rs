@@ -6,13 +6,13 @@ use std::collections::VecDeque;
 
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
-use super::{centered_rect, Dialog, DialogOutcome};
+use super::{Dialog, DialogOutcome, centered_rect};
 use crate::theme::rtc;
 
 pub struct LearnKeysDialog {
@@ -40,14 +40,22 @@ impl Dialog for LearnKeysDialog {
     fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(60, 14, area);
         f.render_widget(Clear, rect);
-        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
+        let dlg = Style::default()
+            .fg(rtc(scheme.dialog_fg))
+            .bg(rtc(scheme.dialog_bg));
         let block = Block::default()
             .title(Span::styled(
                 " Learn keys ",
-                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(rtc(scheme.dialog_title_fg))
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .border_style(
+                Style::default()
+                    .fg(rtc(scheme.dialog_border))
+                    .bg(rtc(scheme.dialog_bg)),
+            )
             .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
@@ -62,13 +70,20 @@ impl Dialog for LearnKeysDialog {
             lines.push(Line::from(format!("  {c}")));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from("Press Esc twice to close (Esc once is recorded)."));
+        lines.push(Line::from(
+            "Press Esc twice to close (Esc once is recorded).",
+        ));
         f.render_widget(Paragraph::new(lines).style(dlg), inner);
     }
 
     fn handle_key(&mut self, chord: KeyChord) -> DialogOutcome<()> {
         // Special-case: a second Escape closes; first Escape gets recorded.
-        if matches!(chord.code, KeyCode::Escape) && self.history.front().is_some_and(|c| c.code == KeyCode::Escape) {
+        if matches!(chord.code, KeyCode::Escape)
+            && self
+                .history
+                .front()
+                .is_some_and(|c| c.code == KeyCode::Escape)
+        {
             return DialogOutcome::Cancelled;
         }
         self.history.push_front(chord);

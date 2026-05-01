@@ -61,7 +61,11 @@ impl FtpVfs {
         let mut stream = AsyncFtpStream::connect(format!("{}:{}", endpoint.host, endpoint.port))
             .await
             .map_err(|e| Error::Vfs(format!("ftp connect: {e}")))?;
-        let user = if endpoint.user.is_empty() { "anonymous" } else { &endpoint.user };
+        let user = if endpoint.user.is_empty() {
+            "anonymous"
+        } else {
+            &endpoint.user
+        };
         stream
             .login(user, password)
             .await
@@ -129,9 +133,7 @@ fn ftp_to_entry(f: &FtpFile) -> Entry {
         EntryKind::File
     };
     let mtime = Some(f.modified());
-    let target = f
-        .symlink()
-        .map(|p| p.to_string_lossy().into_owned());
+    let target = f.symlink().map(|p| p.to_string_lossy().into_owned());
     Entry {
         name: f.name().to_string(),
         kind,

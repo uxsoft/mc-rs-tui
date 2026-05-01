@@ -7,7 +7,7 @@ use std::process::{Command, ExitStatus};
 use anyhow::{Context, Result};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
 /// Determine the editor command. Honors `$EDITOR`, falls back to `hx`, then `vi`.

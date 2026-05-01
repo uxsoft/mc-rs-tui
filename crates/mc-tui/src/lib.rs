@@ -3,10 +3,10 @@
 pub mod app;
 pub mod clipboard;
 pub mod dialog;
+pub mod diff_widget;
 pub mod editor_spawn;
 pub mod event;
 pub mod glob;
-pub mod diff_widget;
 pub mod loop_;
 pub mod panel;
 pub mod subshell;

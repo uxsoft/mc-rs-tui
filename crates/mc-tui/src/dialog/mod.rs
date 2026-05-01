@@ -17,8 +17,8 @@ pub mod vfs_list;
 
 use mc_config::ColorScheme;
 use mc_core::key::KeyChord;
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 
 pub use confirm::ConfirmDialog;
 pub use find::{FindForm, FindFormOutcome, FindParams, FindResults, FindResultsOutcome};
