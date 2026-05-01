@@ -590,6 +590,13 @@ impl App {
                 }
                 DialogOutcome::Cancelled | DialogOutcome::Submitted(_) => Disposition::Redraw,
             },
+            Modal::Theme(mut dlg) => match dlg.handle_mouse(ev, area) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Theme(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled | DialogOutcome::Submitted(_) => Disposition::Redraw,
+            },
             Modal::QuitConfirm(mut dlg) => match dlg.handle_mouse(ev, area) {
                 DialogOutcome::None => {
                     self.modal = Modal::QuitConfirm(dlg);

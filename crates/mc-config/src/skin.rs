@@ -46,6 +46,14 @@ impl SkinFile {
         crate::io::load_toml_or_default(path)
     }
 
+    /// Serialize to TOML and write to `path` atomically (tempfile + rename;
+    /// `0600` perms on Unix). Creates parent dirs as needed.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let s = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        crate::io::write_user_file_atomic(path, s.as_bytes())
+    }
+
     /// Resolve to a concrete [`ColorScheme`]: pick the named base theme,
     /// then apply any per-field overrides from `[colors]`. Bad theme names
     /// fall back to the default; unknown override keys / unparseable values
@@ -224,5 +232,32 @@ mod tests {
         s.colors.insert("panel_bg".into(), "puce".into());
         let (_, warnings) = s.resolve();
         assert!(warnings.iter().any(|w| w.contains("panel_bg")));
+    }
+
+    #[test]
+    fn save_round_trip_preserves_theme_and_overrides() {
+        let td = tempfile::tempdir().unwrap();
+        let p = td.path().join("skin.toml");
+        let s = SkinFile {
+            theme: "tokyo-night".into(),
+            colors: [("panel_bg".into(), "#101018".into())].into(),
+        };
+        s.save(&p).unwrap();
+        let loaded = SkinFile::load(&p).unwrap();
+        assert_eq!(loaded.theme, "tokyo-night");
+        assert_eq!(
+            loaded.colors.get("panel_bg").map(String::as_str),
+            Some("#101018")
+        );
+    }
+
+    #[test]
+    fn available_themes_all_resolve() {
+        for (name, _) in ColorScheme::available_themes() {
+            assert!(
+                ColorScheme::from_named(name).is_some(),
+                "theme '{name}' missing from from_named()"
+            );
+        }
     }
 }

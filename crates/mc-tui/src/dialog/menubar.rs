@@ -46,6 +46,7 @@ pub enum MenuDialog {
     FindAndPanelize,
     Encoding,
     DisplayBits,
+    Theme,
 }
 
 /// Action emitted when the user selects a menu item.
@@ -469,6 +470,11 @@ fn build_sections() -> Vec<Section> {
             entries: options_section_entries(),
         },
         Section {
+            title: "Appearance",
+            mnemonic: 'A',
+            entries: appearance_section_entries(),
+        },
+        Section {
             title: "Right",
             mnemonic: 'R',
             entries: panel_section_entries(false),
@@ -674,4 +680,8 @@ fn options_section_entries() -> Vec<MenuEntry> {
         sep(),
         item("Save setup", "", dlg(MenuDialog::SaveSetup)),
     ]
+}
+
+fn appearance_section_entries() -> Vec<MenuEntry> {
+    vec![item("Theme...", "", dlg(MenuDialog::Theme))]
 }

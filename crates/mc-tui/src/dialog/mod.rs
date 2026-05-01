@@ -12,6 +12,7 @@ pub mod menubar;
 pub mod options;
 pub mod password;
 pub mod progress;
+pub mod theme;
 pub mod user_menu;
 pub mod vfs_list;
 
@@ -33,6 +34,7 @@ pub use menubar::{MenuBar, MenuChoice, MenuDialog};
 pub use options::{OptionField, OptionKey, OptionsDialog};
 pub use password::PasswordDialog;
 pub use progress::ProgressDialog;
+pub use theme::ThemeDialog;
 pub use user_menu::{UserMenuDialog, UserMenuEntry};
 pub use vfs_list::{VfsListAction, VfsListDialog};
 

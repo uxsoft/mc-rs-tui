@@ -100,6 +100,7 @@ impl App {
                 d.render(f, area, scheme)
             }
             Modal::Layout(d) => d.render(f, area, scheme),
+            Modal::Theme(d) => d.render(f, area, scheme),
             Modal::QuitConfirm(d) => d.render(f, area, scheme),
         }
         if menu_focused {

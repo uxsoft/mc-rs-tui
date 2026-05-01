@@ -297,6 +297,7 @@ pub(super) enum Modal {
     Layout(crate::dialog::LayoutDialog),
     Confirmation(crate::dialog::OptionsDialog),
     VirtualFs(crate::dialog::OptionsDialog),
+    Theme(crate::dialog::ThemeDialog),
     QuitConfirm(ConfirmDialog),
 }
 

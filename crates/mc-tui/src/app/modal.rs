@@ -541,6 +541,25 @@ impl App {
                     Disposition::Redraw
                 }
             },
+            Modal::Theme(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Theme(dlg);
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(name) => {
+                    self.skin.theme = name;
+                    let (scheme, warnings) = self.skin.resolve();
+                    self.scheme = scheme;
+                    for w in warnings {
+                        self.set_status(w);
+                    }
+                    if let Err(e) = self.skin.save(&self.paths.skin()) {
+                        self.set_status(format!("save skin: {e}"));
+                    }
+                    Disposition::Redraw
+                }
+            },
             Modal::Confirmation(mut dlg) => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
                     self.modal = Modal::Confirmation(dlg);
@@ -811,6 +830,10 @@ impl App {
             }
             MenuDialog::DisplayBits => {
                 self.set_status("display bits: UTF-8 only");
+                Disposition::Redraw
+            }
+            MenuDialog::Theme => {
+                self.modal = Modal::Theme(crate::dialog::ThemeDialog::new(&self.skin.theme));
                 Disposition::Redraw
             }
         }

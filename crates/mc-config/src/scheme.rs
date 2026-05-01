@@ -87,6 +87,17 @@ impl ColorScheme {
         }
     }
 
+    /// Built-in themes as `(name, display_label)` pairs. The names round-trip
+    /// through [`Self::from_named`].
+    #[must_use]
+    pub fn available_themes() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("modern-dark", "Modern Dark"),
+            ("tokyo-night", "Tokyo Night"),
+            ("solarized-light", "Solarized Light"),
+        ]
+    }
+
     /// Default theme — Catppuccin-Mocha inspired dark palette tuned for
     /// WCAG-AA contrast on every text-bearing pair.
     #[must_use]
