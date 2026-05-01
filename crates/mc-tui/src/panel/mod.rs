@@ -208,6 +208,19 @@ impl PanelState {
     }
 }
 
+/// The on-screen rect where panel rows are drawn — i.e. the area inside
+/// the surrounding `Block` border with the bottom status row sliced off.
+/// Mirrors the geometry [`render_panel`] uses (it must, otherwise mouse
+/// hit-tests will pick the wrong row).
+#[must_use]
+pub fn panel_body_rect(area: Rect) -> Rect {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner)[0]
+}
+
 pub fn render_panel(
     f: &mut Frame<'_>,
     area: Rect,

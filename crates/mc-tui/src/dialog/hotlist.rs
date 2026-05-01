@@ -1,3 +1,4 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mc_config::{ColorScheme, Hotlist};
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::Frame;
@@ -152,6 +153,50 @@ impl Dialog for HotlistDialog {
                 } else {
                     DialogOutcome::None
                 }
+            }
+            _ => DialogOutcome::None,
+        }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent, area: Rect) -> DialogOutcome<HotlistAction> {
+        let rect = centered_rect(70, 18, area);
+        let inside = ev.column >= rect.x
+            && ev.column < rect.x + rect.width
+            && ev.row >= rect.y
+            && ev.row < rect.y + rect.height;
+        match ev.kind {
+            MouseEventKind::ScrollUp if inside => {
+                self.cursor = self.cursor.saturating_sub(1);
+                DialogOutcome::None
+            }
+            MouseEventKind::ScrollDown if inside => {
+                if self.cursor + 1 < self.hotlist.entries.len() {
+                    self.cursor += 1;
+                }
+                DialogOutcome::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !inside {
+                    return DialogOutcome::Cancelled;
+                }
+                // Inner body sits inside the 1-col border, status hint is the
+                // last row inside (height 1).
+                let body_y = rect.y + 1;
+                let body_h = rect.height.saturating_sub(2).saturating_sub(1);
+                if ev.row < body_y || ev.row >= body_y + body_h {
+                    return DialogOutcome::None;
+                }
+                let row_in_body = (ev.row - body_y) as usize;
+                let target = self.view_offset + row_in_body;
+                if target >= self.hotlist.entries.len() {
+                    return DialogOutcome::None;
+                }
+                if target == self.cursor {
+                    let path = self.hotlist.entries[target].path.clone();
+                    return DialogOutcome::Submitted(HotlistAction::Navigate(path));
+                }
+                self.cursor = target;
+                DialogOutcome::None
             }
             _ => DialogOutcome::None,
         }

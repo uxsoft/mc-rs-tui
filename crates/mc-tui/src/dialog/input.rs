@@ -1,3 +1,4 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use ratatui::Frame;
@@ -202,5 +203,26 @@ impl Dialog for InputDialog {
             }
             _ => DialogOutcome::None,
         }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent, area: Rect) -> DialogOutcome<String> {
+        if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return DialogOutcome::None;
+        }
+        let rect = super::centered_rect(60, 6, area);
+        let inside = ev.column >= rect.x
+            && ev.column < rect.x + rect.width
+            && ev.row >= rect.y
+            && ev.row < rect.y + rect.height;
+        if !inside {
+            return DialogOutcome::Cancelled;
+        }
+        let inner_x = rect.x + 1;
+        let value_y = rect.y + 2; // inner.y + 1
+        if ev.row == value_y && ev.column >= inner_x {
+            let col = (ev.column - inner_x) as usize;
+            self.cursor = col.min(self.value.chars().count());
+        }
+        DialogOutcome::None
     }
 }

@@ -1,3 +1,4 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::Frame;
@@ -79,5 +80,42 @@ impl Dialog for ConfirmDialog {
             }
             _ => DialogOutcome::None,
         }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent, area: Rect) -> DialogOutcome<bool> {
+        if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return DialogOutcome::None;
+        }
+        let rect = centered_rect(60, 6, area);
+        // Click outside dialog → cancel.
+        if ev.column < rect.x
+            || ev.column >= rect.x + rect.width
+            || ev.row < rect.y
+            || ev.row >= rect.y + rect.height
+        {
+            return DialogOutcome::Cancelled;
+        }
+        // The buttons row matches `render`: inner top-left is (rect.x+1, rect.y+1).
+        // body lines: 0=message, 1=blank, 2=buttons, 3=blank, 4=hint.
+        let inner_x = rect.x + 1;
+        let inner_y = rect.y + 1;
+        let buttons_y = inner_y + 2;
+        if ev.row != buttons_y {
+            return DialogOutcome::None;
+        }
+        // Spans: "        " (8), " [ Yes ] " (9), "    " (4), " [ No ] " (8).
+        let yes_start = inner_x + 8;
+        let yes_end = yes_start + 9;
+        let no_start = yes_end + 4;
+        let no_end = no_start + 8;
+        if ev.column >= yes_start && ev.column < yes_end {
+            self.yes = true;
+            return DialogOutcome::Submitted(true);
+        }
+        if ev.column >= no_start && ev.column < no_end {
+            self.yes = false;
+            return DialogOutcome::Submitted(false);
+        }
+        DialogOutcome::None
     }
 }

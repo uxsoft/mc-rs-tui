@@ -1,5 +1,6 @@
 //! Background-jobs view (Ctrl-J).
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::Frame;
@@ -126,6 +127,43 @@ impl Dialog for JobsViewDialog {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.cursor = self.cursor.saturating_sub(1);
+                DialogOutcome::None
+            }
+            _ => DialogOutcome::None,
+        }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent, area: Rect) -> DialogOutcome<()> {
+        let rect = centered_rect(80, 18, area);
+        let inside = ev.column >= rect.x
+            && ev.column < rect.x + rect.width
+            && ev.row >= rect.y
+            && ev.row < rect.y + rect.height;
+        match ev.kind {
+            MouseEventKind::ScrollUp if inside => {
+                self.cursor = self.cursor.saturating_sub(1);
+                DialogOutcome::None
+            }
+            MouseEventKind::ScrollDown if inside => {
+                if self.cursor + 1 < self.rows.len() {
+                    self.cursor += 1;
+                }
+                DialogOutcome::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !inside {
+                    return DialogOutcome::Cancelled;
+                }
+                let body_y = rect.y + 1;
+                let body_h = rect.height.saturating_sub(2).saturating_sub(1);
+                if ev.row < body_y || ev.row >= body_y + body_h {
+                    return DialogOutcome::None;
+                }
+                let row_in_body = (ev.row - body_y) as usize;
+                let target = self.offset + row_in_body;
+                if target < self.rows.len() {
+                    self.cursor = target;
+                }
                 DialogOutcome::None
             }
             _ => DialogOutcome::None,

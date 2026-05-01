@@ -1,4 +1,4 @@
-- Remove the confirm dialog when pressing F10
 - Add F before all the numbers on the buttons below
 - Theme switcher menu item
-- Code review with focus on simplification, refactoring, etc.
+- Make the application fully navigable via mouse as well as keyboard
+- Streamline the user experience for copying, moving, deleting, ...

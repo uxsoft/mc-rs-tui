@@ -15,6 +15,7 @@ pub mod progress;
 pub mod user_menu;
 pub mod vfs_list;
 
+use crossterm::event::MouseEvent;
 use mc_config::ColorScheme;
 use mc_core::key::KeyChord;
 use ratatui::Frame;
@@ -56,4 +57,11 @@ pub trait Dialog {
     type Output;
     fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme);
     fn handle_key(&mut self, chord: KeyChord) -> DialogOutcome<Self::Output>;
+    /// Default no-op mouse handler. Override on dialogs that benefit from
+    /// clicking. `area` is the same outer rect passed to `render`; the dialog
+    /// re-derives its on-screen rect inside (matching the renderer's geometry)
+    /// and hit-tests there.
+    fn handle_mouse(&mut self, _ev: MouseEvent, _area: Rect) -> DialogOutcome<Self::Output> {
+        DialogOutcome::None
+    }
 }

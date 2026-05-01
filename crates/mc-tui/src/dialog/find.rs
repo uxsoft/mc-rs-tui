@@ -1,3 +1,4 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mc_config::ColorScheme;
 use mc_core::VPath;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
@@ -187,6 +188,32 @@ impl Dialog for FindForm {
             }
             _ => DialogOutcome::None,
         }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent, area: Rect) -> DialogOutcome<FindFormOutcome> {
+        if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return DialogOutcome::None;
+        }
+        let rect = centered_rect(70, 13, area);
+        let inside = ev.column >= rect.x
+            && ev.column < rect.x + rect.width
+            && ev.row >= rect.y
+            && ev.row < rect.y + rect.height;
+        if !inside {
+            return DialogOutcome::Submitted(FindFormOutcome::Cancel);
+        }
+        let inner_y = rect.y + 1;
+        let row = ev.row.saturating_sub(inner_y) as usize;
+        if row < FIELDS.len() {
+            self.field = row;
+            // Clicking a checkbox row also toggles it.
+            match self.current_field() {
+                Field::Case => self.params.case_sensitive = !self.params.case_sensitive,
+                Field::WholeWord => self.params.whole_word = !self.params.whole_word,
+                _ => {}
+            }
+        }
+        DialogOutcome::None
     }
 }
 
@@ -400,6 +427,51 @@ impl Dialog for FindResults {
                 } else {
                     DialogOutcome::Submitted(FindResultsOutcome::Panelize(self.items.clone()))
                 }
+            }
+            _ => DialogOutcome::None,
+        }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent, area: Rect) -> DialogOutcome<FindResultsOutcome> {
+        let rect = centered_rect(80, 22, area);
+        let inside = ev.column >= rect.x
+            && ev.column < rect.x + rect.width
+            && ev.row >= rect.y
+            && ev.row < rect.y + rect.height;
+        match ev.kind {
+            MouseEventKind::ScrollUp if inside => {
+                self.cursor = self.cursor.saturating_sub(1);
+                self.scroll_into_view();
+                DialogOutcome::None
+            }
+            MouseEventKind::ScrollDown if inside => {
+                if self.cursor + 1 < self.items.len() {
+                    self.cursor += 1;
+                }
+                self.scroll_into_view();
+                DialogOutcome::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !inside {
+                    return DialogOutcome::Cancelled;
+                }
+                let body_y = rect.y + 1;
+                // body height = inner.height - 2 (status + hint)
+                let body_h = rect.height.saturating_sub(2).saturating_sub(2);
+                if ev.row < body_y || ev.row >= body_y + body_h {
+                    return DialogOutcome::None;
+                }
+                let row_in_body = (ev.row - body_y) as usize;
+                let target = self.view_offset + row_in_body;
+                if target >= self.items.len() {
+                    return DialogOutcome::None;
+                }
+                if target == self.cursor {
+                    let p = self.items[target].clone();
+                    return DialogOutcome::Submitted(FindResultsOutcome::Navigate(p));
+                }
+                self.cursor = target;
+                DialogOutcome::None
             }
             _ => DialogOutcome::None,
         }
