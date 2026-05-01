@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    EventStream, KeyEventKind, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -32,8 +32,13 @@ impl TerminalGuard {
     pub fn enter() -> Result<Self> {
         enable_raw_mode().context("enable raw mode")?;
         let mut out = io::stdout();
-        execute!(out, EnterAlternateScreen, EnableBracketedPaste)
-            .context("enter alternate screen")?;
+        execute!(
+            out,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture,
+        )
+        .context("enter alternate screen")?;
         Ok(Self { active: true })
     }
 }
@@ -41,7 +46,12 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
+            let _ = execute!(
+                io::stdout(),
+                DisableMouseCapture,
+                DisableBracketedPaste,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
         }
     }
@@ -95,38 +105,13 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
                 match maybe_ev {
                     Some(Ok(Event::Key(ev))) if ev.kind == KeyEventKind::Press => {
                         if let Some(chord) = chord_from_crossterm(ev) {
-                            match app.handle_key(chord) {
-                                Disposition::Quit => break,
-                                Disposition::Redraw => redraw = true,
-                                Disposition::ReloadActive => {
-                                    app.ensure_remote_mount().await;
-                                    app.refresh_active().await;
-                                    update_title(&app);
-                                    rearm_watcher(&app, &mut watcher, &watch_tx);
-                                    redraw = true;
-                                }
-                                Disposition::ReloadBoth => {
-                                    app.ensure_remote_mount().await;
-                                    app.refresh_both().await;
-                                    update_title(&app);
-                                    rearm_watcher(&app, &mut watcher, &watch_tx);
-                                    redraw = true;
-                                }
-                                Disposition::RebuildTree => {
-                                    app.rebuild_tree().await;
-                                    redraw = true;
-                                }
-                                Disposition::TreeToggle => {
-                                    app.tree_toggle().await;
-                                    redraw = true;
-                                }
-                                Disposition::RunOp(op) => {
-                                    run_op(&mut app, &mut terminal, op, &mut find).await;
-                                    update_title(&app);
-                                    rearm_watcher(&app, &mut watcher, &watch_tx);
-                                    redraw = true;
-                                }
-                                Disposition::None => {}
+                            let disp = app.handle_key(chord);
+                            match apply_disposition(
+                                disp, &mut app, &mut terminal, &mut find,
+                                &mut watcher, &watch_tx,
+                            ).await {
+                                LoopOutcome::Break => break,
+                                LoopOutcome::Continue { redraw: r } => redraw |= r,
                             }
                         }
                     }
@@ -134,6 +119,24 @@ pub async fn run(mut app: App, mut job_rx: JobUpdateRx) -> Result<ExitInfo> {
                     Some(Ok(Event::Paste(text))) => {
                         app.handle_paste(text);
                         redraw = true;
+                    }
+                    Some(Ok(Event::Mouse(ev))) => {
+                        if matches!(
+                            ev.kind,
+                            MouseEventKind::Down(MouseButton::Left)
+                                | MouseEventKind::Down(MouseButton::Right)
+                                | MouseEventKind::ScrollUp
+                                | MouseEventKind::ScrollDown
+                        ) {
+                            let disp = app.handle_mouse(ev);
+                            match apply_disposition(
+                                disp, &mut app, &mut terminal, &mut find,
+                                &mut watcher, &watch_tx,
+                            ).await {
+                                LoopOutcome::Break => break,
+                                LoopOutcome::Continue { redraw: r } => redraw |= r,
+                            }
+                        }
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
@@ -257,6 +260,59 @@ async fn recv_find(find: &mut Option<FindStream>) -> Option<FindEvent> {
     match find.as_mut() {
         Some(fs) => fs.rx.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Outcome of applying a [`Disposition`] to the run-loop. `Break` exits the
+/// outer event loop (Quit); `Continue` returns whether a redraw is needed.
+enum LoopOutcome {
+    Break,
+    Continue { redraw: bool },
+}
+
+/// Single dispatcher for `Disposition` — shared by the key, mouse, and any
+/// future event paths. Handles `ensure_remote_mount`, panel refresh, title
+/// updates, watcher re-arm, and `RunOp` execution.
+async fn apply_disposition<B: ratatui::backend::Backend>(
+    disp: Disposition,
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    find: &mut Option<FindStream>,
+    watcher: &mut PanelWatcher,
+    watch_tx: &tokio::sync::mpsc::UnboundedSender<()>,
+) -> LoopOutcome {
+    match disp {
+        Disposition::Quit => LoopOutcome::Break,
+        Disposition::None => LoopOutcome::Continue { redraw: false },
+        Disposition::Redraw => LoopOutcome::Continue { redraw: true },
+        Disposition::ReloadActive => {
+            app.ensure_remote_mount().await;
+            app.refresh_active().await;
+            update_title(app);
+            rearm_watcher(app, watcher, watch_tx);
+            LoopOutcome::Continue { redraw: true }
+        }
+        Disposition::ReloadBoth => {
+            app.ensure_remote_mount().await;
+            app.refresh_both().await;
+            update_title(app);
+            rearm_watcher(app, watcher, watch_tx);
+            LoopOutcome::Continue { redraw: true }
+        }
+        Disposition::RebuildTree => {
+            app.rebuild_tree().await;
+            LoopOutcome::Continue { redraw: true }
+        }
+        Disposition::TreeToggle => {
+            app.tree_toggle().await;
+            LoopOutcome::Continue { redraw: true }
+        }
+        Disposition::RunOp(op) => {
+            run_op(app, terminal, op, find).await;
+            update_title(app);
+            rearm_watcher(app, watcher, watch_tx);
+            LoopOutcome::Continue { redraw: true }
+        }
     }
 }
 

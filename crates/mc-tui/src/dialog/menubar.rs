@@ -72,6 +72,10 @@ pub enum MenuChoice {
     OpenDialog(MenuDialog),
     /// Show a transient status message (used for stub items).
     Status(&'static str),
+    /// Open the User menu directly (so the "User menu" item doesn't depend
+    /// on F2's keybinding, which has been reassigned to opening this
+    /// menubar).
+    OpenUserMenu,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +105,12 @@ pub struct MenuBar {
     sections: Vec<Section>,
     pub active_section: usize,
     pub active_item: usize,
+}
+
+struct DropdownLayout {
+    rect: Rect,
+    max_label: usize,
+    max_hint: usize,
 }
 
 impl MenuBar {
@@ -178,6 +188,97 @@ impl MenuBar {
         }
     }
 
+    /// Hit-test the title row: returns the section index whose title spans
+    /// `column` (0-based), or `None` if the click landed on whitespace
+    /// between titles or past the last one. The layout matches
+    /// [`MenuBar::render_titles`]: leading 1-space margin, then for each
+    /// section `" {title} "` followed by 1 separator space.
+    #[must_use]
+    pub fn section_at_column(&self, column: u16) -> Option<usize> {
+        let mut x: u16 = 1; // leading margin
+        for (i, s) in self.sections.iter().enumerate() {
+            let title_w = (s.title.len() as u16).saturating_add(2); // " title "
+            if column >= x && column < x + title_w {
+                return Some(i);
+            }
+            x = x.saturating_add(title_w + 1); // + separator
+        }
+        None
+    }
+
+    /// Hit-test the active section's dropdown body. Caller passes the
+    /// dropdown's inner body rect (the area inside the borders) and the
+    /// click's row offset within that area. Returns `Some(MenuChoice)` if
+    /// the row is an item (and updates the cursor); `None` for separator
+    /// or out-of-range.
+    pub fn item_choice_at(&mut self, row_in_body: u16) -> Option<MenuChoice> {
+        let entries = &self.sections[self.active_section].entries;
+        let i = row_in_body as usize;
+        match entries.get(i)? {
+            MenuEntry::Item(it) => {
+                self.active_item = i;
+                Some(it.choice.clone())
+            }
+            MenuEntry::Separator => None,
+        }
+    }
+
+    /// Open the menu and select the given section. Helper for mouse code.
+    pub fn open_at(&mut self, section: usize) {
+        if section < self.sections.len() {
+            self.active_section = section;
+            self.active_item = self.first_item_index(section);
+        }
+    }
+
+    /// Geometry for the active section's dropdown: maximum label / hint
+    /// widths (used for both layout and per-row formatting), plus the
+    /// already-clipped on-screen rect.
+    fn dropdown_layout(&self, area: Rect) -> DropdownLayout {
+        let section = &self.sections[self.active_section];
+        let max_label = section
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item(it) => Some(it.label.len()),
+                MenuEntry::Separator => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let max_hint = section
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item(it) => Some(it.hint.len()),
+                MenuEntry::Separator => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let inner_w = (max_label + max_hint + 5) as u16;
+        let w = inner_w + 2;
+        let h = section.entries.len() as u16 + 2;
+
+        // Mirror the title-row layout: leading 1-space margin, then each
+        // preceding section is `" {title} "` (len+2) plus a 1-space separator.
+        let mut x = area.x + 1;
+        for s in self.sections.iter().take(self.active_section) {
+            x += s.title.len() as u16 + 3;
+        }
+        let rect = Rect::new(
+            x,
+            area.y,
+            w.min(area.width.saturating_sub(x.saturating_sub(area.x))),
+            h.min(area.height),
+        );
+        DropdownLayout { rect, max_label, max_hint }
+    }
+
+    /// Return the on-screen rect for the active section's dropdown.
+    #[must_use]
+    pub fn dropdown_rect(&self, area: Rect) -> Rect {
+        self.dropdown_layout(area).rect
+    }
+
     /// Render the always-visible 1-row title strip into `area`. When
     /// `focused` is true the active section is highlighted (used while the
     /// menu has keyboard focus); otherwise titles are drawn in the chrome
@@ -222,42 +323,9 @@ impl MenuBar {
             .bg(rtc(scheme.dialog_bg));
 
         let section = &self.sections[self.active_section];
+        let layout = self.dropdown_layout(area);
+        let DropdownLayout { rect: dropdown, max_label, max_hint } = layout;
 
-        let max_label = section
-            .entries
-            .iter()
-            .filter_map(|e| match e {
-                MenuEntry::Item(it) => Some(it.label.len()),
-                MenuEntry::Separator => None,
-            })
-            .max()
-            .unwrap_or(0);
-        let max_hint = section
-            .entries
-            .iter()
-            .filter_map(|e| match e {
-                MenuEntry::Item(it) => Some(it.hint.len()),
-                MenuEntry::Separator => None,
-            })
-            .max()
-            .unwrap_or(0);
-        let inner_w = (max_label + max_hint + 5) as u16;
-        let w = inner_w + 2;
-        let h = section.entries.len() as u16 + 2;
-
-        let mut x = area.x;
-        for s in self.sections.iter().take(self.active_section) {
-            x += s.title.len() as u16 + 3;
-        }
-        // Leading space before first section.
-        x += 1;
-
-        let dropdown = Rect::new(
-            x,
-            area.y,
-            w.min(area.width.saturating_sub(x.saturating_sub(area.x))),
-            h.min(area.height),
-        );
         f.render_widget(Clear, dropdown);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -517,7 +585,7 @@ fn file_section_entries() -> Vec<MenuEntry> {
 
 fn command_section_entries() -> Vec<MenuEntry> {
     vec![
-        item("User menu", "F2", key(KeyCode::F(2))),
+        item("User menu", "", MenuChoice::OpenUserMenu),
         sep(),
         item(
             "Find file",

@@ -1,0 +1,4 @@
+- Remove the confirm dialog when pressing F10
+- Add F before all the numbers on the buttons below
+- Theme switcher menu item
+- Code review with focus on simplification, refactoring, etc.

@@ -104,11 +104,42 @@ pub enum Disposition {
     RunOp(PendingOp),
 }
 
+/// Distinguishes Copy (F5) from Move (F6) for the unified destination prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyMoveKind {
+    Copy,
+    Move,
+}
+
+impl CopyMoveKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Copy => " Copy ",
+            Self::Move => " Move ",
+        }
+    }
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy",
+            Self::Move => "Move",
+        }
+    }
+}
+
 /// What the UI is currently focused on. Modal state lives here.
 enum Modal {
     None,
     Mkdir(InputDialog),
     DeleteConfirm(ConfirmDialog, Vec<VPath>),
+    /// MC-style "Copy to:" / "Move to:" prompt. Sources collected at F5/F6
+    /// time; on Enter the destination is parsed and the corresponding job
+    /// is submitted. `kind` selects Copy vs Move.
+    CopyMove {
+        dlg: InputDialog,
+        sources: Vec<VPath>,
+        src_cwd: VPath,
+        kind: CopyMoveKind,
+    },
     Rename(InputDialog, VPath),
     SelectGroup { dlg: InputDialog, select: bool },
     Chmod { dlg: InputDialog, targets: Vec<VPath> },
@@ -344,19 +375,15 @@ impl App {
                 mc_jobs::JobUpdateKind::Progress(p) => dlg.progress = p,
                 mc_jobs::JobUpdateKind::Status(s) => dlg.status = s,
                 mc_jobs::JobUpdateKind::Log(_) => {}
-                mc_jobs::JobUpdateKind::Finished(o) => dlg.finished = Some(o),
+                mc_jobs::JobUpdateKind::Finished(o) => {
+                    let dismiss = matches!(o, mc_jobs::JobOutcome::Success);
+                    dlg.finished = Some(o);
+                    if dismiss {
+                        self.modal = Modal::None;
+                    }
+                }
             }
         }
-    }
-
-    #[must_use]
-    pub fn modal_is_progress(&self) -> bool {
-        matches!(self.modal, Modal::Progress(_))
-    }
-
-    #[must_use]
-    pub fn progress_finished(&self) -> bool {
-        matches!(&self.modal, Modal::Progress(d) if d.finished.is_some())
     }
 
     fn active(&mut self) -> &mut PanelState {
@@ -643,6 +670,70 @@ impl App {
         self.refresh_panel(self.active_left).await;
     }
 
+    /// Handle a mouse event. Currently scoped to the top menubar:
+    /// - left-click on row 0 opens the menu and selects the section under
+    ///   the cursor (or closes the menu if it was already open and the
+    ///   click landed off-section);
+    /// - left-click on a dropdown row, when the menu is active, selects
+    ///   that row's choice;
+    /// - left-click anywhere else while the menu is active closes it.
+    /// All other clicks are ignored (no panel-cell click yet).
+    pub fn handle_mouse(&mut self, ev: crossterm::event::MouseEvent) -> Disposition {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return Disposition::None;
+        }
+        let col = ev.column;
+        let row = ev.row;
+
+        // 1) Click on the menubar title row toggles / activates the menu.
+        if row == 0 {
+            if let Some(idx) = self.menubar.section_at_column(col) {
+                if matches!(self.modal, Modal::Menu) && self.menubar.active_section == idx {
+                    // Same section clicked → close the dropdown.
+                    self.modal = Modal::None;
+                } else {
+                    self.menubar.open_at(idx);
+                    self.modal = Modal::Menu;
+                }
+                return Disposition::Redraw;
+            }
+            // Click on whitespace between titles: just close any open menu.
+            if matches!(self.modal, Modal::Menu) {
+                self.modal = Modal::None;
+                return Disposition::Redraw;
+            }
+            return Disposition::None;
+        }
+
+        // 2) If the menu is open, route clicks on the dropdown body.
+        if matches!(self.modal, Modal::Menu) {
+            // The dropdown is anchored just under the title row at column 0.
+            // Width/height passed here only clip the rect — `u16::MAX` keeps
+            // the natural geometry intact, which is what we want for a
+            // hit-test (we do not have the real frame width here).
+            let area = ratatui::layout::Rect::new(0, 1, u16::MAX, u16::MAX);
+            let drop = self.menubar.dropdown_rect(area);
+            // Inner body: skip the top/bottom border, left/right border.
+            if row >= drop.y + 1
+                && row < drop.y + drop.height.saturating_sub(1)
+                && col >= drop.x + 1
+                && col < drop.x + drop.width.saturating_sub(1)
+            {
+                let row_in_body = row - (drop.y + 1);
+                if let Some(choice) = self.menubar.item_choice_at(row_in_body) {
+                    return self.handle_menu_choice(choice);
+                }
+                return Disposition::Redraw;
+            }
+            // Click outside dropdown → close.
+            self.modal = Modal::None;
+            return Disposition::Redraw;
+        }
+
+        Disposition::None
+    }
+
     pub fn handle_key(&mut self, chord: KeyChord) -> Disposition {
         // Apply user remap before dispatch. Modal text-input dialogs receive
         // the remapped chord too so users can rebind e.g. C-d → F8 globally.
@@ -697,6 +788,33 @@ impl App {
                 },
             },
             Modal::PrefixCtrlX => self.handle_ctrl_x(chord),
+            Modal::CopyMove { mut dlg, sources, src_cwd, kind } => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::CopyMove { dlg, sources, src_cwd, kind };
+                    Disposition::Redraw
+                }
+                DialogOutcome::Cancelled => Disposition::Redraw,
+                DialogOutcome::Submitted(input) => match parse_dst(&input, &src_cwd) {
+                    Some(dst_dir) => Disposition::RunOp(match kind {
+                        CopyMoveKind::Copy => PendingOp::SubmitCopy { sources, dst_dir },
+                        CopyMoveKind::Move => PendingOp::SubmitMove { sources, dst_dir },
+                    }),
+                    None => {
+                        self.set_status(format!(
+                            "{}: invalid destination: {input}",
+                            kind.verb()
+                        ));
+                        let prompt = format!("{} to:", kind.verb());
+                        self.modal = Modal::CopyMove {
+                            dlg: InputDialog::new(kind.title(), &prompt, input),
+                            sources,
+                            src_cwd,
+                            kind,
+                        };
+                        Disposition::Redraw
+                    }
+                },
+            },
             Modal::Rename(mut dlg, src) => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
                     self.modal = Modal::Rename(dlg, src);
@@ -831,13 +949,17 @@ impl App {
                     }
                 }
             },
-            Modal::Progress(dlg) => match (chord.code, dlg.finished.is_some()) {
-                (KeyCode::Escape, false) => {
-                    dlg.handle.cancel();
-                    self.modal = Modal::Progress(dlg);
+            Modal::Progress(dlg) => match (chord.code, chord.mods) {
+                // Ctrl-C cancels the running job (still closes the dialog).
+                (KeyCode::Char('c'), m) if m == KeyMods::CTRL => {
+                    if dlg.finished.is_none() {
+                        dlg.handle.cancel();
+                    }
                     Disposition::Redraw
                 }
-                (KeyCode::Escape, true) | (KeyCode::Enter, _) => Disposition::Redraw,
+                // Esc / Enter just hide the dialog. The job keeps running in
+                // the background; its completion will refresh both panels.
+                (KeyCode::Escape, _) | (KeyCode::Enter, _) => Disposition::Redraw,
                 _ => {
                     self.modal = Modal::Progress(dlg);
                     Disposition::None
@@ -1330,6 +1452,10 @@ impl App {
                 self.set_status(msg);
                 Disposition::Redraw
             }
+            MenuChoice::OpenUserMenu => {
+                self.modal = Modal::UserMenu(crate::dialog::UserMenuDialog::with_defaults());
+                Disposition::Redraw
+            }
             MenuChoice::OpenDialog(d) => self.open_menu_dialog(d),
         }
     }
@@ -1593,6 +1719,49 @@ impl App {
         panel.is_virtual_panelized = true;
         self.modal = Modal::None;
         self.set_status(format!("panelized {} items", items.len()));
+    }
+
+    /// Open the top menubar, resetting cursor to the first item of the first
+    /// section. Shared by F2, F9, and (indirectly) the menu-choice "User
+    /// menu"-style menubar entry points.
+    fn open_menubar(&mut self) -> Disposition {
+        self.menubar.reset();
+        self.modal = Modal::Menu;
+        Disposition::Redraw
+    }
+
+    /// Collect the F5/F6 sources from the active panel, then defer to
+    /// [`open_copy_move_with`].
+    fn open_copy_move(&mut self, kind: CopyMoveKind) -> Disposition {
+        let sources = self.selected_targets();
+        if sources.is_empty() {
+            return Disposition::None;
+        }
+        self.open_copy_move_with(sources, kind)
+    }
+
+    /// Open the unified Copy/Move destination prompt for the given sources.
+    /// The default destination mirrors mc: the *other* panel's cwd.
+    fn open_copy_move_with(&mut self, sources: Vec<VPath>, kind: CopyMoveKind) -> Disposition {
+        let dst_dir = if self.active_left {
+            self.right.cwd.clone()
+        } else {
+            self.left.cwd.clone()
+        };
+        let prompt = if sources.len() == 1 {
+            format!("{} {} to:", kind.verb(), display_basename(&sources[0]))
+        } else {
+            format!("{} {} items to:", kind.verb(), sources.len())
+        };
+        let prefilled = display_dst(&dst_dir);
+        let src_cwd = self.active_ref().cwd.clone();
+        self.modal = Modal::CopyMove {
+            dlg: InputDialog::new(kind.title(), &prompt, prefilled),
+            sources,
+            src_cwd,
+            kind,
+        };
+        Disposition::Redraw
     }
 
     /// Either return `Disposition::Quit` directly or open a confirmation
@@ -1919,6 +2088,10 @@ impl App {
                 self.active().toggle_mark();
                 Disposition::Redraw
             }
+            (KeyCode::Char(' '), m) if m.is_empty() || m == KeyMods::SHIFT => {
+                self.active().toggle_mark();
+                Disposition::Redraw
+            }
 
             // Hidden toggle
             (KeyCode::Char('.'), m) if m == KeyMods::CTRL || m == KeyMods::ALT => {
@@ -1970,11 +2143,7 @@ impl App {
             }
 
             // F9 — menu bar
-            (KeyCode::F(9), m) if m.is_empty() => {
-                self.menubar.reset();
-                self.modal = Modal::Menu;
-                Disposition::Redraw
-            }
+            (KeyCode::F(9), m) if m.is_empty() => self.open_menubar(),
 
             // Alt-? — Find file
             (KeyCode::Char('?'), m) if m == KeyMods::ALT || m == KeyMods::ALT | KeyMods::SHIFT => {
@@ -2031,11 +2200,10 @@ impl App {
                 Disposition::Redraw
             }
 
-            // F2 — User menu
-            (KeyCode::F(2), m) if m.is_empty() => {
-                self.modal = Modal::UserMenu(crate::dialog::UserMenuDialog::with_defaults());
-                Disposition::Redraw
-            }
+            // F2 — open the top menu bar (the buttonbar labels F2 as
+            // "Menu"; users expect it to be the obvious menu shortcut).
+            // The user menu remains reachable via Command → User menu.
+            (KeyCode::F(2), m) if m.is_empty() => self.open_menubar(),
 
             // ":" — open the command line
             (KeyCode::Char(':'), m) if m.is_empty() || m == KeyMods::SHIFT => {
@@ -2130,19 +2298,8 @@ impl App {
                 Disposition::None
             }
 
-            // F5 — copy (recursive, via job queue)
-            (KeyCode::F(5), m) if m.is_empty() => {
-                let sources = self.selected_targets();
-                if sources.is_empty() {
-                    return Disposition::None;
-                }
-                let dst_dir = if self.active_left {
-                    self.right.cwd.clone()
-                } else {
-                    self.left.cwd.clone()
-                };
-                Disposition::RunOp(PendingOp::SubmitCopy { sources, dst_dir })
-            }
+            // F5 — copy: prompt for destination (mc-style), then submit job.
+            (KeyCode::F(5), m) if m.is_empty() => self.open_copy_move(CopyMoveKind::Copy),
 
             // F6 — when a single non-".." entry is targeted in same dir → rename dialog.
             // Otherwise: move to other panel (recursive job).
@@ -2166,12 +2323,7 @@ impl App {
                     }
                     return Disposition::None;
                 }
-                let dst_dir = if self.active_left {
-                    self.right.cwd.clone()
-                } else {
-                    self.left.cwd.clone()
-                };
-                Disposition::RunOp(PendingOp::SubmitMove { sources, dst_dir })
+                self.open_copy_move_with(sources, CopyMoveKind::Move)
             }
 
             // + select group, \\ unselect group
@@ -2223,12 +2375,6 @@ impl App {
                 );
                 Disposition::Redraw
             }
-            // Esc closes a finished progress dialog.
-            (KeyCode::Escape, _) if self.progress_finished() => {
-                self.modal = Modal::None;
-                Disposition::Redraw
-            }
-
             _ => Disposition::None,
         }
     }
@@ -2281,6 +2427,7 @@ impl App {
         match &mut self.modal {
             Modal::None | Modal::PrefixCtrlX | Modal::Menu => {}
             Modal::Mkdir(d) | Modal::Rename(d, _) => d.render(f, area, scheme),
+            Modal::CopyMove { dlg, .. } => dlg.render(f, area, scheme),
             Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => dlg.render(f, area, scheme),
             Modal::DeleteConfirm(d, _) => d.render(f, area, scheme),
             Modal::Viewer(v) => v.render(f, area, scheme),
@@ -2352,6 +2499,48 @@ fn next_sort(s: SortKey) -> SortKey {
         SortKey::Ctime => SortKey::Unsorted,
         SortKey::Unsorted | SortKey::Inode => SortKey::Name,
     }
+}
+
+/// Display a destination directory for the Copy/Move prompt: bare local path
+/// for single-layer local cwds, full `Display` form (e.g. `sftp://...`)
+/// otherwise.
+fn display_dst(p: &VPath) -> String {
+    match p.last() {
+        Some(l) if l.scheme == "local" && p.layers().len() == 1 && l.location.is_empty() => {
+            l.sub.display().to_string()
+        }
+        _ => p.to_string(),
+    }
+}
+
+/// Show just the file name of a source path (e.g. `hello.txt`), for the
+/// "Copy <name> to:" prompt.
+fn display_basename(p: &VPath) -> String {
+    p.last()
+        .and_then(|l| l.sub.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| p.to_string())
+}
+
+/// Parse the destination string from the Copy/Move dialog into a `VPath`.
+/// Accepts: full VPath strings (`local:/x`, `sftp://h/p`); absolute local
+/// paths (`/x`); paths relative to `src_cwd` when that cwd is local.
+fn parse_dst(input: &str, src_cwd: &VPath) -> Option<VPath> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(p) = s.parse::<VPath>() {
+        return Some(p);
+    }
+    let pb = PathBuf::from(s);
+    if pb.is_absolute() {
+        return Some(VPath::local(pb));
+    }
+    let layer = src_cwd.last()?;
+    if layer.scheme == "local" && src_cwd.layers().len() == 1 {
+        return Some(VPath::local(layer.sub.join(&pb)));
+    }
+    None
 }
 
 fn child_path(parent: &VPath, name: &str) -> Option<VPath> {

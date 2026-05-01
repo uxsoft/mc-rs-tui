@@ -94,7 +94,7 @@ impl ProgressDialog {
         let hint = if self.finished.is_some() {
             "Enter / Esc: close"
         } else {
-            "Esc: cancel"
+            "Esc / Enter: hide (continues in background)   Ctrl-C: cancel"
         };
         f.render_widget(
             Paragraph::new(hint).style(Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg))),
