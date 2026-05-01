@@ -1,12 +1,13 @@
-use mc_config::Hotlist;
+use mc_config::{ColorScheme, Hotlist};
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{centered_rect, Dialog, DialogOutcome};
+use crate::theme::rtc;
 
 pub enum HotlistAction {
     /// Navigate to the path display string.
@@ -37,14 +38,18 @@ impl HotlistDialog {
 impl Dialog for HotlistDialog {
     type Output = HotlistAction;
 
-    fn render(&self, f: &mut Frame<'_>, area: Rect) {
+    fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(70, 18, area);
         f.render_widget(Clear, rect);
+        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
         let block = Block::default()
-            .title(" Hotlist ")
+            .title(Span::styled(
+                " Hotlist ",
+                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Cyan))
-            .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
@@ -70,9 +75,9 @@ impl Dialog for HotlistDialog {
                 .take(height)
                 .map(|(i, e)| {
                     let style = if i == self.cursor {
-                        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)).add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        dlg
                     };
                     Line::from(vec![
                         Span::styled(format!(" {:<22} ", e.label), style),
@@ -82,11 +87,11 @@ impl Dialog for HotlistDialog {
                 })
                 .collect()
         };
-        f.render_widget(Paragraph::new(lines), body);
+        f.render_widget(Paragraph::new(lines).style(dlg), body);
         f.render_widget(
             Paragraph::new(Line::from(
                 "Enter: cd    a: add current    d: delete    Esc: close",
-            )),
+            )).style(Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg))),
             hint_area,
         );
     }

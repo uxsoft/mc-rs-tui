@@ -6,12 +6,15 @@
 
 use std::path::Path;
 
+use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
+
+use crate::theme::rtc;
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 
@@ -185,8 +188,13 @@ impl ViewerWidget {
         }
     }
 
-    pub fn render(&self, f: &mut Frame<'_>, area: Rect) {
+    pub fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         f.render_widget(Clear, area);
+        let panel = Style::default().fg(rtc(scheme.panel_fg)).bg(rtc(scheme.panel_bg));
+        let bar_btn = Style::default().fg(rtc(scheme.buttonbar_fg)).bg(rtc(scheme.buttonbar_bg));
+        let bar_lbl = Style::default().fg(rtc(scheme.buttonbar_label_fg)).bg(rtc(scheme.buttonbar_label_bg));
+        let search = Style::default().fg(rtc(scheme.search_fg)).bg(rtc(scheme.search_bg));
+
         let mode_label = match self.mode {
             ViewerMode::Text => "TEXT",
             ViewerMode::Hex => "HEX ",
@@ -195,10 +203,13 @@ impl ViewerWidget {
         let enc = self.encoding.name();
         let title = format!(" View [{mode_label} {enc}] {}{} ", self.title, trunc);
         let block = Block::default()
-            .title(title)
+            .title(Span::styled(
+                title,
+                Style::default().fg(rtc(scheme.panel_title_fg)).add_modifier(Modifier::BOLD),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Blue))
-            .style(Style::default().fg(Color::White).bg(Color::Blue));
+            .border_style(Style::default().fg(rtc(scheme.panel_border)).bg(rtc(scheme.panel_bg)))
+            .style(panel);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -211,41 +222,35 @@ impl ViewerWidget {
             ViewerMode::Text => self.render_text(chunks[0].height as usize),
             ViewerMode::Hex => self.render_hex(chunks[0].height as usize),
         };
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().fg(Color::White).bg(Color::Blue)),
-            chunks[0],
-        );
+        f.render_widget(Paragraph::new(lines).style(panel), chunks[0]);
 
         let bar = if let Some(state) = &self.search {
             if state.typing {
                 Line::from(vec![
-                    Span::styled("/", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                    Span::styled(state.pattern.clone(), Style::default().fg(Color::Black).bg(Color::Yellow)),
+                    Span::styled("/", search.add_modifier(Modifier::BOLD)),
+                    Span::styled(state.pattern.clone(), search),
                     Span::raw("    Enter: search   Esc: cancel"),
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled("found ", Style::default().fg(Color::White).bg(Color::Black)),
-                    Span::styled(state.pattern.clone(), Style::default().fg(Color::Yellow).bg(Color::Black).add_modifier(Modifier::BOLD)),
+                    Span::styled("found ", bar_btn),
+                    Span::styled(state.pattern.clone(), Style::default().fg(rtc(scheme.search_bg)).bg(rtc(scheme.statusbar_bg)).add_modifier(Modifier::BOLD)),
                     Span::raw("    n: next   N: prev   /: new search   q: close"),
                 ])
             }
         } else {
             Line::from(vec![
-                Span::styled("F4", Style::default().fg(Color::White).bg(Color::Black)),
-                Span::styled("Hex", Style::default().fg(Color::Black).bg(Color::Cyan)),
+                Span::styled("F4", bar_btn),
+                Span::styled("Hex", bar_lbl),
                 Span::raw("  "),
-                Span::styled("/", Style::default().fg(Color::White).bg(Color::Black)),
-                Span::styled("Search", Style::default().fg(Color::Black).bg(Color::Cyan)),
+                Span::styled("/", bar_btn),
+                Span::styled("Search", bar_lbl),
                 Span::raw("  "),
-                Span::styled("F10", Style::default().fg(Color::White).bg(Color::Black)),
-                Span::styled("Quit", Style::default().fg(Color::Black).bg(Color::Cyan)),
+                Span::styled("F10", bar_btn),
+                Span::styled("Quit", bar_lbl),
             ])
         };
-        f.render_widget(
-            Paragraph::new(bar).style(Style::default().bg(Color::Black).add_modifier(Modifier::DIM)),
-            chunks[1],
-        );
+        f.render_widget(Paragraph::new(bar).style(bar_btn), chunks[1]);
     }
 
     fn render_text(&self, height: usize) -> Vec<Line<'static>> {

@@ -5,13 +5,16 @@
 
 use std::path::{Path, PathBuf};
 
+use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use mc_diff::{DiffModel, Row};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
+
+use crate::theme::rtc;
 
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
@@ -75,8 +78,9 @@ impl DiffWidget {
         true
     }
 
-    pub fn render(&mut self, f: &mut Frame<'_>, area: Rect) {
+    pub fn render(&mut self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         f.render_widget(Clear, area);
+        let panel = Style::default().fg(rtc(scheme.panel_fg)).bg(rtc(scheme.panel_bg));
         let title = format!(
             " Diff [{} hunks]   {} | {} ",
             self.model.hunks.len(),
@@ -84,10 +88,13 @@ impl DiffWidget {
             self.right_label,
         );
         let block = Block::default()
-            .title(title)
+            .title(Span::styled(
+                title,
+                Style::default().fg(rtc(scheme.panel_title_fg)).add_modifier(Modifier::BOLD),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Blue))
-            .style(Style::default().fg(Color::White).bg(Color::Blue));
+            .border_style(Style::default().fg(rtc(scheme.panel_border)).bg(rtc(scheme.panel_bg)))
+            .style(panel);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -110,15 +117,9 @@ impl DiffWidget {
             self.view_offset = self.cursor + 1 - height;
         }
 
-        let (left_lines, right_lines) = self.lines(self.view_offset, height);
-        f.render_widget(
-            Paragraph::new(left_lines).style(Style::default().fg(Color::White).bg(Color::Blue)),
-            cols[0],
-        );
-        f.render_widget(
-            Paragraph::new(right_lines).style(Style::default().fg(Color::White).bg(Color::Blue)),
-            cols[1],
-        );
+        let (left_lines, right_lines) = self.lines(self.view_offset, height, scheme);
+        f.render_widget(Paragraph::new(left_lines).style(panel), cols[0]);
+        f.render_widget(Paragraph::new(right_lines).style(panel), cols[1]);
 
         let hint_line = Line::from(vec![
             Span::raw(" "),
@@ -130,7 +131,7 @@ impl DiffWidget {
             Span::raw(": close"),
         ]);
         f.render_widget(
-            Paragraph::new(hint_line).style(Style::default().bg(Color::Black).fg(Color::White)),
+            Paragraph::new(hint_line).style(Style::default().fg(rtc(scheme.statusbar_fg)).bg(rtc(scheme.statusbar_bg))),
             hint,
         );
     }
@@ -139,7 +140,14 @@ impl DiffWidget {
         &self,
         view_offset: usize,
         height: usize,
+        scheme: &ColorScheme,
     ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+        let panel = Style::default().fg(rtc(scheme.panel_fg)).bg(rtc(scheme.panel_bg));
+        let muted = Style::default().fg(rtc(scheme.muted_fg)).bg(rtc(scheme.panel_bg));
+        let add = Style::default().fg(rtc(scheme.diff_add_fg)).bg(rtc(scheme.diff_add_bg));
+        let del = Style::default().fg(rtc(scheme.diff_del_fg)).bg(rtc(scheme.diff_del_bg));
+        let focus = Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg));
+
         let mut left = Vec::with_capacity(height);
         let mut right = Vec::with_capacity(height);
         let end = (view_offset + height).min(self.model.rows.len());
@@ -148,43 +156,20 @@ impl DiffWidget {
             let cursor = i == self.cursor;
             let (l_span, r_span) = match row {
                 Row::Same(s) => {
-                    let st = if cursor {
-                        Style::default().fg(Color::Black).bg(Color::Yellow)
-                    } else {
-                        Style::default().fg(Color::White).bg(Color::Blue)
-                    };
+                    let st = if cursor { focus } else { panel };
                     (Span::styled(trim_nl(s), st), Span::styled(trim_nl(s), st))
                 }
                 Row::Removed(s) => {
-                    let l = Style::default().fg(Color::White).bg(Color::Red);
-                    let r = Style::default().fg(Color::DarkGray).bg(Color::Blue);
-                    let cur = if cursor { l.add_modifier(Modifier::BOLD) } else { l };
-                    (
-                        Span::styled(trim_nl(s), cur),
-                        Span::styled(String::new(), r),
-                    )
+                    let cur = if cursor { del.add_modifier(Modifier::BOLD) } else { del };
+                    (Span::styled(trim_nl(s), cur), Span::styled(String::new(), muted))
                 }
                 Row::Added(s) => {
-                    let l = Style::default().fg(Color::DarkGray).bg(Color::Blue);
-                    let r = Style::default().fg(Color::White).bg(Color::Green);
-                    let cur = if cursor { r.add_modifier(Modifier::BOLD) } else { r };
-                    (
-                        Span::styled(String::new(), l),
-                        Span::styled(trim_nl(s), cur),
-                    )
+                    let cur = if cursor { add.add_modifier(Modifier::BOLD) } else { add };
+                    (Span::styled(String::new(), muted), Span::styled(trim_nl(s), cur))
                 }
                 Row::Changed(l, r) => {
-                    let lst = if cursor {
-                        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White).bg(Color::Magenta)
-                    };
-                    let rst = if cursor {
-                        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White).bg(Color::Magenta)
-                    };
-                    (Span::styled(trim_nl(l), lst), Span::styled(trim_nl(r), rst))
+                    let st = if cursor { focus.add_modifier(Modifier::BOLD) } else { focus };
+                    (Span::styled(trim_nl(l), st), Span::styled(trim_nl(r), st))
                 }
             };
             left.push(Line::from(l_span));

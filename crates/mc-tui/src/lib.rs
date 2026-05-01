@@ -9,6 +9,7 @@ pub mod diff_widget;
 pub mod loop_;
 pub mod panel;
 pub mod subshell;
+pub mod theme;
 pub mod viewer_widget;
 pub mod watcher;
 

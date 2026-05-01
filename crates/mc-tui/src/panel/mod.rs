@@ -5,7 +5,7 @@ pub mod sort;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use mc_config::{parse_color_name, AnsiColor, FileHighlight, SkinFile};
+use mc_config::{ColorScheme, FileHighlight};
 use mc_core::action::SortKey;
 use mc_core::{Entry, EntryKind, VPath};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+use crate::theme::rtc;
 use sort::sort_entries;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,18 +191,22 @@ pub fn render_panel(
     area: Rect,
     state: &mut PanelState,
     highlight: &FileHighlight,
-    skin: &SkinFile,
+    scheme: &ColorScheme,
 ) {
-    let bg = ansi_to_ratatui(parse_color_name(&skin.panel.background));
-    let border = ansi_to_ratatui(parse_color_name(&skin.panel.border));
-    let active_border = ansi_to_ratatui(parse_color_name(&skin.panel.active_border));
-    let cursor_bg = ansi_to_ratatui(parse_color_name(&skin.panel.cursor_bg));
-    let cursor_fg = ansi_to_ratatui(parse_color_name(&skin.panel.cursor_fg));
-    let marked_fg = ansi_to_ratatui(parse_color_name(&skin.panel.marked_fg));
+    let bg = rtc(scheme.panel_bg);
+    let fg = rtc(scheme.panel_fg);
+    let border = rtc(scheme.panel_border);
+    let active_border = rtc(scheme.panel_border_active);
+    let cursor_bg = rtc(scheme.cursor_bg);
+    let cursor_fg = rtc(scheme.cursor_fg);
+    let marked_fg = rtc(scheme.marked_fg);
     let title_style = if state.active {
-        Style::default().fg(cursor_fg).bg(cursor_bg).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(rtc(scheme.panel_title_active_fg))
+            .bg(rtc(scheme.panel_title_active_bg))
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White).bg(bg)
+        Style::default().fg(rtc(scheme.panel_title_fg)).bg(bg)
     };
     let title = Line::from(vec![
         Span::raw(" "),
@@ -245,14 +250,14 @@ pub fn render_panel(
     }
 
     let lines = if matches!(state.mode, ListingMode::Tree) {
-        render_tree(state, height, bg, cursor_bg, cursor_fg)
+        render_tree(state, height, bg, fg, cursor_bg, cursor_fg)
     } else {
         render_entries(
             state,
             body_area.width as usize,
             height,
             highlight,
-            skin,
+            scheme,
             bg,
             cursor_bg,
             cursor_fg,
@@ -275,7 +280,7 @@ pub fn render_panel(
         String::from("(empty)")
     };
     let status_line =
-        Paragraph::new(status).style(Style::default().fg(Color::White).bg(bg));
+        Paragraph::new(status).style(Style::default().fg(rtc(scheme.panel_dim_fg)).bg(bg));
     f.render_widget(status_line, status_area);
 }
 
@@ -285,7 +290,7 @@ fn render_entries(
     width: usize,
     height: usize,
     highlight: &FileHighlight,
-    skin: &SkinFile,
+    scheme: &ColorScheme,
     bg: Color,
     cursor_bg: Color,
     cursor_fg: Color,
@@ -304,7 +309,7 @@ fn render_entries(
             is_cursor,
             is_marked,
             highlight,
-            skin,
+            scheme,
             bg,
             cursor_bg,
             cursor_fg,
@@ -322,13 +327,13 @@ fn format_line(
     is_cursor: bool,
     is_marked: bool,
     highlight: &FileHighlight,
-    skin: &SkinFile,
+    scheme: &ColorScheme,
     bg: Color,
     cursor_bg: Color,
     cursor_fg: Color,
     marked_fg: Color,
 ) -> Line<'static> {
-    let mut style = entry_style(e, highlight, skin, bg);
+    let mut style = entry_style(e, highlight, scheme, bg);
     if is_marked {
         style = style.fg(marked_fg).add_modifier(Modifier::BOLD);
     }
@@ -357,6 +362,7 @@ fn render_tree(
     state: &PanelState,
     height: usize,
     bg: Color,
+    fg: Color,
     cursor_bg: Color,
     cursor_fg: Color,
 ) -> Vec<Line<'static>> {
@@ -364,7 +370,7 @@ fn render_tree(
     let end = (state.view_offset + height).min(state.tree.nodes.len());
     for i in state.view_offset..end {
         let n = &state.tree.nodes[i];
-        let mut style = Style::default().fg(Color::White).bg(bg).add_modifier(Modifier::BOLD);
+        let mut style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
         if i == state.tree.cursor && state.active {
             style = style.bg(cursor_bg).fg(cursor_fg);
         }
@@ -380,47 +386,34 @@ fn render_tree(
     lines
 }
 
-fn entry_style(e: &Entry, highlight: &FileHighlight, skin: &SkinFile, bg: Color) -> Style {
-    let base = Style::default().fg(Color::White).bg(bg);
+fn entry_style(e: &Entry, highlight: &FileHighlight, scheme: &ColorScheme, bg: Color) -> Style {
+    let base = Style::default().fg(rtc(scheme.panel_fg)).bg(bg);
     match e.kind {
-        EntryKind::Dir => base.add_modifier(Modifier::BOLD),
-        EntryKind::Symlink => base.fg(Color::Cyan),
-        EntryKind::Fifo | EntryKind::Socket => base.fg(Color::Magenta),
-        EntryKind::BlockDevice | EntryKind::CharDevice => base.fg(Color::Yellow),
+        EntryKind::Dir => base.fg(rtc(scheme.file_dir)).add_modifier(Modifier::BOLD),
+        EntryKind::Symlink => base.fg(rtc(scheme.file_symlink)),
+        EntryKind::Fifo | EntryKind::Socket => base.fg(rtc(scheme.file_special)),
+        EntryKind::BlockDevice | EntryKind::CharDevice => base.fg(rtc(scheme.file_device)),
         EntryKind::File => {
             if let Some(mode) = e.mode {
                 if mode & 0o111 != 0 {
-                    return base.fg(Color::Green);
+                    return base.fg(rtc(scheme.file_executable));
                 }
             }
             if let Some(group) = highlight.classify(&e.name) {
-                if let Some(name) = skin.groups.get(group) {
-                    return base.fg(ansi_to_ratatui(parse_color_name(name)));
-                }
+                let c = match group {
+                    "archive" => scheme.file_archive,
+                    "image" => scheme.file_image,
+                    "audio" | "video" => scheme.file_media,
+                    "doc" => scheme.file_doc,
+                    "source" => scheme.file_source,
+                    "build" => scheme.file_build,
+                    _ => scheme.panel_fg,
+                };
+                return base.fg(rtc(c));
             }
             base
         }
         EntryKind::Other => base,
-    }
-}
-
-fn ansi_to_ratatui(c: AnsiColor) -> Color {
-    match c {
-        AnsiColor::Black => Color::Black,
-        AnsiColor::Red => Color::Red,
-        AnsiColor::Green => Color::Green,
-        AnsiColor::Yellow => Color::Yellow,
-        AnsiColor::Blue => Color::Blue,
-        AnsiColor::Magenta => Color::Magenta,
-        AnsiColor::Cyan => Color::Cyan,
-        AnsiColor::White => Color::White,
-        AnsiColor::DarkGray => Color::DarkGray,
-        AnsiColor::LightRed => Color::LightRed,
-        AnsiColor::LightGreen => Color::LightGreen,
-        AnsiColor::LightYellow => Color::LightYellow,
-        AnsiColor::LightBlue => Color::LightBlue,
-        AnsiColor::LightMagenta => Color::LightMagenta,
-        AnsiColor::LightCyan => Color::LightCyan,
     }
 }
 

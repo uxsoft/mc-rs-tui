@@ -1,11 +1,13 @@
+use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{centered_rect, Dialog, DialogOutcome};
+use crate::theme::rtc;
 
 pub struct InputDialog {
     title: String,
@@ -88,22 +90,25 @@ impl InputDialog {
 impl Dialog for InputDialog {
     type Output = String;
 
-    fn render(&self, f: &mut Frame<'_>, area: Rect) {
+    fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(60, 6, area);
         f.render_widget(Clear, rect);
         let block = Block::default()
-            .title(self.title.clone())
+            .title(ratatui::text::Span::styled(
+                self.title.clone(),
+                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Cyan))
-            .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .style(Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg)));
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
         let prompt_line = Line::from(self.prompt.clone());
         let value_line = Line::from(self.value.clone()).style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
+                .fg(rtc(scheme.input_fg))
+                .bg(rtc(scheme.input_bg))
                 .add_modifier(Modifier::BOLD),
         );
         let hint = Line::from("Enter: OK    Esc: Cancel");

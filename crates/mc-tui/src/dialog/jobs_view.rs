@@ -1,13 +1,15 @@
 //! Background-jobs view (Ctrl-J).
 
+use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{centered_rect, Dialog, DialogOutcome};
+use crate::theme::rtc;
 
 #[derive(Debug, Clone)]
 pub struct JobRow {
@@ -37,14 +39,18 @@ impl JobsViewDialog {
 impl Dialog for JobsViewDialog {
     type Output = ();
 
-    fn render(&self, f: &mut Frame<'_>, area: Rect) {
+    fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(80, 18, area);
         f.render_widget(Clear, rect);
+        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
         let block = Block::default()
-            .title(" Background jobs ")
+            .title(Span::styled(
+                " Background jobs ",
+                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Cyan))
-            .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
@@ -69,11 +75,11 @@ impl Dialog for JobsViewDialog {
                 .take(height)
                 .map(|(i, r)| {
                     let style = if i == self.cursor {
-                        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)).add_modifier(Modifier::BOLD)
                     } else if r.finished {
-                        Style::default().fg(Color::DarkGray).bg(Color::Cyan)
+                        Style::default().fg(rtc(scheme.muted_fg)).bg(rtc(scheme.dialog_bg))
                     } else {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        dlg
                     };
                     Line::from(vec![
                         Span::styled(format!(" {:>4} ", r.id_str), style),
@@ -85,9 +91,11 @@ impl Dialog for JobsViewDialog {
                 })
                 .collect()
         };
-        f.render_widget(Paragraph::new(lines), body);
+        f.render_widget(Paragraph::new(lines).style(dlg), body);
         f.render_widget(
-            Paragraph::new(Line::from("j/k or arrows: scroll    Esc: close")),
+            Paragraph::new(Line::from("j/k or arrows: scroll    Esc: close")).style(
+                Style::default().fg(rtc(scheme.panel_dim_fg)).bg(rtc(scheme.dialog_bg)),
+            ),
             hint_area,
         );
     }

@@ -3,14 +3,16 @@
 //! Sections (mc parity, simplified): File, Command, Options. Selecting an item
 //! emits a [`MenuChoice`] that the App maps to an action.
 
+use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{Dialog, DialogOutcome};
+use crate::theme::rtc;
 
 #[derive(Debug, Clone, Copy)]
 pub enum MenuChoice {
@@ -100,22 +102,28 @@ impl Default for MenuBar {
 impl Dialog for MenuBar {
     type Output = MenuChoice;
 
-    fn render(&self, f: &mut Frame<'_>, area: Rect) {
+    fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
+        let chrome = Style::default().fg(rtc(scheme.buttonbar_label_fg)).bg(rtc(scheme.buttonbar_label_bg));
+        let chrome_active = Style::default()
+            .fg(rtc(scheme.dialog_focus_fg))
+            .bg(rtc(scheme.dialog_focus_bg))
+            .add_modifier(Modifier::BOLD);
+        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
+        let dlg_focus = Style::default()
+            .fg(rtc(scheme.dialog_focus_fg))
+            .bg(rtc(scheme.dialog_focus_bg))
+            .add_modifier(Modifier::BOLD);
+
         f.render_widget(Clear, Rect::new(area.x, area.y, area.width, 1));
 
         // Top bar: section titles.
         let mut spans: Vec<Span> = Vec::new();
         for (i, s) in self.sections.iter().enumerate() {
-            let style = if i == self.active_section {
-                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
-            };
+            let style = if i == self.active_section { chrome_active } else { chrome };
             spans.push(Span::styled(format!(" {} ", s.title), style));
             spans.push(Span::raw(" "));
         }
-        let bar = Paragraph::new(Line::from(spans))
-            .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+        let bar = Paragraph::new(Line::from(spans)).style(chrome);
         f.render_widget(bar, Rect::new(area.x, area.y, area.width, 1));
 
         // Drop-down for active section.
@@ -134,8 +142,8 @@ impl Dialog for MenuBar {
         f.render_widget(Clear, dropdown);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Cyan))
-            .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .style(dlg);
         let inner = block.inner(dropdown);
         f.render_widget(block, dropdown);
 
@@ -144,16 +152,12 @@ impl Dialog for MenuBar {
             .iter()
             .enumerate()
             .map(|(i, it)| {
-                let style = if i == self.active_item {
-                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                };
+                let style = if i == self.active_item { dlg_focus } else { dlg };
                 let label = format!(" {:<lw$}  {:>hw$} ", it.label, it.hint, lw = max_label, hw = max_hint);
                 Line::from(Span::styled(label, style))
             })
             .collect();
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).style(dlg), inner);
     }
 
     fn handle_key(&mut self, chord: KeyChord) -> DialogOutcome<MenuChoice> {

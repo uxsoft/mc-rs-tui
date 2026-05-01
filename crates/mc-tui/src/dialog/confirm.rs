@@ -1,11 +1,13 @@
+use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{centered_rect, Dialog, DialogOutcome};
+use crate::theme::rtc;
 
 pub struct ConfirmDialog {
     title: String,
@@ -27,27 +29,24 @@ impl ConfirmDialog {
 impl Dialog for ConfirmDialog {
     type Output = bool;
 
-    fn render(&self, f: &mut Frame<'_>, area: Rect) {
+    fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(60, 6, area);
         f.render_widget(Clear, rect);
+        let bg_style = Style::default().fg(rtc(scheme.danger_fg)).bg(rtc(scheme.danger_bg));
+        let focus_style = Style::default()
+            .fg(rtc(scheme.danger_focus_fg))
+            .bg(rtc(scheme.danger_focus_bg))
+            .add_modifier(Modifier::BOLD);
         let block = Block::default()
             .title(self.title.clone())
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Red))
-            .style(Style::default().fg(Color::White).bg(Color::Red));
+            .border_style(bg_style)
+            .style(bg_style);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
-        let yes_style = if self.yes {
-            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White).bg(Color::Red)
-        };
-        let no_style = if !self.yes {
-            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White).bg(Color::Red)
-        };
+        let yes_style = if self.yes { focus_style } else { bg_style };
+        let no_style = if !self.yes { focus_style } else { bg_style };
 
         let buttons = Line::from(vec![
             ratatui::text::Span::raw("        "),

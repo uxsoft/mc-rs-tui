@@ -12,6 +12,7 @@ pub mod password;
 pub mod progress;
 pub mod user_menu;
 
+use mc_config::ColorScheme;
 use mc_core::key::KeyChord;
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -47,6 +48,6 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 pub trait Dialog {
     type Output;
-    fn render(&self, f: &mut Frame<'_>, area: Rect);
+    fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme);
     fn handle_key(&mut self, chord: KeyChord) -> DialogOutcome<Self::Output>;
 }

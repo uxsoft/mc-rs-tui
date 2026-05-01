@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mc_config::{
-    AppConfig, CompiledExtBindings, ConfigPaths, ExtAction, ExtBindings, FileHighlight, History,
-    Hotlist, Keymap, SkinFile,
+    AppConfig, ColorScheme, CompiledExtBindings, ConfigPaths, ExtAction, ExtBindings,
+    FileHighlight, History, Hotlist, Keymap, SkinFile,
 };
 use mc_core::action::SortKey;
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
@@ -13,11 +13,13 @@ use mc_core::{Entry, EntryKind, VPath};
 use mc_jobs::{JobQueue, JobUpdateRx};
 use mc_vfs::{Registry, Vfs};
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use tracing::warn;
+
+use crate::theme::rtc;
 
 use crate::dialog::{
     ConfirmDialog, Dialog, DialogOutcome, FindForm, FindFormOutcome, FindParams, FindResults,
@@ -128,6 +130,7 @@ pub struct App {
     pub extbinds: CompiledExtBindings,
     pub keymap: Keymap,
     pub skin: SkinFile,
+    pub scheme: ColorScheme,
     pub cmd_history: History,
     /// Transient status: (text, deadline). Shown in place of buttonbar until
     /// `deadline` is reached.
@@ -159,6 +162,10 @@ impl App {
             tracing::warn!("skin: load failed: {e}");
             SkinFile::default()
         });
+        let (scheme, scheme_warnings) = skin.resolve();
+        for w in scheme_warnings {
+            tracing::warn!("{w}");
+        }
         let cmd_history = History::load(paths.config_dir.join("cmd_history"), 100);
         let app = Self {
             config,
@@ -174,6 +181,7 @@ impl App {
             extbinds,
             keymap,
             skin,
+            scheme,
             cmd_history,
             status_msg: None,
             modal: Modal::None,
@@ -1689,63 +1697,64 @@ impl App {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[0]);
 
-        render_panel(f, panels[0], &mut self.left, &self.highlight, &self.skin);
-        render_panel(f, panels[1], &mut self.right, &self.highlight, &self.skin);
+        render_panel(f, panels[0], &mut self.left, &self.highlight, &self.scheme);
+        render_panel(f, panels[1], &mut self.right, &self.highlight, &self.scheme);
         if let Some(status) = self.current_status() {
             let p = Paragraph::new(Line::from(format!(" {status} "))).style(
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(rtc(self.scheme.op_status_fg))
+                    .bg(rtc(self.scheme.op_status_bg))
                     .add_modifier(ratatui::style::Modifier::BOLD),
             );
             f.render_widget(p, chunks[1]);
         } else {
-            render_buttonbar(f, chunks[1]);
+            render_buttonbar(f, chunks[1], &self.scheme);
         }
 
+        let scheme = &self.scheme;
         match &mut self.modal {
             Modal::None | Modal::PrefixCtrlX => {}
-            Modal::Mkdir(d) | Modal::Rename(d, _) => d.render(f, area),
-            Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => dlg.render(f, area),
-            Modal::DeleteConfirm(d, _) => d.render(f, area),
-            Modal::Viewer(v) => v.render(f, area),
-            Modal::Progress(d) => d.render(f, area),
-            Modal::Hotlist(d) => d.render(f, area),
-            Modal::Menu(d) => d.render(f, area),
-            Modal::FindForm(d) => d.render(f, area),
-            Modal::FindResults(d) => d.render(f, area),
-            Modal::CmdLine(d) => d.render(f, area),
-            Modal::UserMenu(d) => d.render(f, area),
-            Modal::Diff(d) => d.render(f, area),
-            Modal::Help(d) => d.render(f, area),
-            Modal::QuickCd(d) => d.render(f, area),
-            Modal::LearnKeys(d) => d.render(f, area),
-            Modal::JobsView(d) => d.render(f, area),
-            Modal::Password { dlg, .. } => dlg.render(f, area),
-            Modal::QuickSearch(filter) => render_quick_search(f, area, filter),
+            Modal::Mkdir(d) | Modal::Rename(d, _) => d.render(f, area, scheme),
+            Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => dlg.render(f, area, scheme),
+            Modal::DeleteConfirm(d, _) => d.render(f, area, scheme),
+            Modal::Viewer(v) => v.render(f, area, scheme),
+            Modal::Progress(d) => d.render(f, area, scheme),
+            Modal::Hotlist(d) => d.render(f, area, scheme),
+            Modal::Menu(d) => d.render(f, area, scheme),
+            Modal::FindForm(d) => d.render(f, area, scheme),
+            Modal::FindResults(d) => d.render(f, area, scheme),
+            Modal::CmdLine(d) => d.render(f, area, scheme),
+            Modal::UserMenu(d) => d.render(f, area, scheme),
+            Modal::Diff(d) => d.render(f, area, scheme),
+            Modal::Help(d) => d.render(f, area, scheme),
+            Modal::QuickCd(d) => d.render(f, area, scheme),
+            Modal::LearnKeys(d) => d.render(f, area, scheme),
+            Modal::JobsView(d) => d.render(f, area, scheme),
+            Modal::Password { dlg, .. } => dlg.render(f, area, scheme),
+            Modal::QuickSearch(filter) => render_quick_search(f, area, filter, scheme),
         }
         if matches!(self.modal, Modal::PrefixCtrlX) {
             let hint = Line::from(" C-x: c=chmod   (Esc to cancel) ");
             let p = Paragraph::new(hint)
-                .style(Style::default().fg(Color::Black).bg(Color::Yellow));
+                .style(Style::default().fg(rtc(self.scheme.op_status_fg)).bg(rtc(self.scheme.op_status_bg)));
             let rect = ratatui::layout::Rect::new(area.x, area.y + area.height.saturating_sub(2), area.width, 1);
             f.render_widget(p, rect);
         }
     }
 }
 
-fn render_quick_search(f: &mut Frame<'_>, area: ratatui::layout::Rect, filter: &str) {
+fn render_quick_search(f: &mut Frame<'_>, area: ratatui::layout::Rect, filter: &str, scheme: &ColorScheme) {
     let line = Line::from(vec![
         Span::raw(" Search: "),
         Span::styled(
             filter.to_string(),
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(rtc(scheme.search_fg))
+                .bg(rtc(scheme.search_bg))
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ]);
-    let p = Paragraph::new(line).style(Style::default().fg(Color::White).bg(Color::Black));
+    let p = Paragraph::new(line).style(Style::default().fg(rtc(scheme.statusbar_fg)).bg(rtc(scheme.statusbar_bg)));
     let rect = ratatui::layout::Rect::new(area.x, area.y + area.height.saturating_sub(2), area.width, 1);
     f.render_widget(p, rect);
 }
@@ -1899,7 +1908,7 @@ mod tests {
     }
 }
 
-fn render_buttonbar(f: &mut Frame<'_>, area: ratatui::layout::Rect) {
+fn render_buttonbar(f: &mut Frame<'_>, area: ratatui::layout::Rect, scheme: &ColorScheme) {
     let labels = [
         (1, "Help"),
         (2, "Menu"),
@@ -1919,14 +1928,14 @@ fn render_buttonbar(f: &mut Frame<'_>, area: ratatui::layout::Rect) {
         }
         spans.push(Span::styled(
             format!("{n}"),
-            Style::default().fg(Color::White).bg(Color::Black),
+            Style::default().fg(rtc(scheme.buttonbar_fg)).bg(rtc(scheme.buttonbar_bg)),
         ));
         spans.push(Span::styled(
             *name,
-            Style::default().fg(Color::Black).bg(Color::Cyan),
+            Style::default().fg(rtc(scheme.buttonbar_label_fg)).bg(rtc(scheme.buttonbar_label_bg)),
         ));
     }
     let line = Line::from(spans);
-    let p = Paragraph::new(line).style(Style::default().bg(Color::Black));
+    let p = Paragraph::new(line).style(Style::default().bg(rtc(scheme.buttonbar_bg)));
     f.render_widget(p, area);
 }

@@ -1,27 +1,17 @@
 //! TOML skin loader.
 //!
-//! Lets users override panel/file colors. Phase-12 first cut: we ship a small
-//! schema that the panel renderer reads at draw time.
+//! Picks one of the built-in themes and optionally overrides individual
+//! semantic colors. All colors are 24-bit RGB hex (`#rrggbb` or `#rgb`),
+//! or `"reset"` / `"default"` for the terminal's default.
 //!
 //! Example `~/.config/mc-rs/skin.toml`:
 //!
 //! ```toml
-//! [panel]
-//! background      = "blue"
-//! border          = "white"
-//! active_border   = "cyan"
-//! cursor_bg       = "cyan"
-//! cursor_fg       = "black"
-//! marked_fg       = "yellow"
+//! theme = "modern-dark"   # "modern-dark" | "tokyo-night" | "solarized-light"
 //!
-//! [groups]
-//! archive = "red"
-//! image   = "magenta"
-//! audio   = "lightmagenta"
-//! video   = "lightmagenta"
-//! doc     = "white"
-//! source  = "lightcyan"
-//! build   = "yellow"
+//! [colors]                # optional per-field overrides
+//! panel_bg  = "#101018"
+//! cursor_bg = "#ffaf00"
 //! ```
 
 use std::collections::HashMap;
@@ -29,60 +19,22 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::scheme::{apply_override, ColorScheme};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkinFile {
-    pub panel: PanelSection,
-    pub groups: HashMap<String, String>,
+    pub theme: String,
+    pub colors: HashMap<String, String>,
 }
 
 impl Default for SkinFile {
     fn default() -> Self {
         Self {
-            panel: PanelSection::default(),
-            groups: default_groups(),
+            theme: "modern-dark".into(),
+            colors: HashMap::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PanelSection {
-    pub background: String,
-    pub border: String,
-    pub active_border: String,
-    pub cursor_bg: String,
-    pub cursor_fg: String,
-    pub marked_fg: String,
-}
-
-impl Default for PanelSection {
-    fn default() -> Self {
-        Self {
-            background: "blue".into(),
-            border: "white".into(),
-            active_border: "cyan".into(),
-            cursor_bg: "cyan".into(),
-            cursor_fg: "black".into(),
-            marked_fg: "yellow".into(),
-        }
-    }
-}
-
-fn default_groups() -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    for (k, v) in [
-        ("archive", "red"),
-        ("image", "magenta"),
-        ("audio", "lightmagenta"),
-        ("video", "lightmagenta"),
-        ("doc", "white"),
-        ("source", "lightcyan"),
-        ("build", "yellow"),
-    ] {
-        m.insert(k.into(), v.into());
-    }
-    m
 }
 
 impl SkinFile {
@@ -99,51 +51,80 @@ impl SkinFile {
             Err(e) => Err(e),
         }
     }
-}
 
-/// Parse a color name into a `(r, g, b)`-style indexed color. We use a simple
-/// 16-color name table. Returns the closest ANSI color; unknown names fall back
-/// to white.
-#[must_use]
-pub fn parse_color_name(name: &str) -> AnsiColor {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "black" => AnsiColor::Black,
-        "red" => AnsiColor::Red,
-        "green" => AnsiColor::Green,
-        "yellow" => AnsiColor::Yellow,
-        "blue" => AnsiColor::Blue,
-        "magenta" | "purple" => AnsiColor::Magenta,
-        "cyan" => AnsiColor::Cyan,
-        "white" | "gray" | "grey" => AnsiColor::White,
-        "darkgray" | "darkgrey" => AnsiColor::DarkGray,
-        "lightred" => AnsiColor::LightRed,
-        "lightgreen" => AnsiColor::LightGreen,
-        "lightyellow" => AnsiColor::LightYellow,
-        "lightblue" => AnsiColor::LightBlue,
-        "lightmagenta" | "lightpurple" => AnsiColor::LightMagenta,
-        "lightcyan" => AnsiColor::LightCyan,
-        _ => AnsiColor::White,
+    /// Resolve to a concrete [`ColorScheme`]: pick the named base theme,
+    /// then apply any per-field overrides from `[colors]`. Bad theme names
+    /// fall back to the default; unknown override keys / unparseable values
+    /// are skipped (callers may inspect the returned warnings).
+    #[must_use]
+    pub fn resolve(&self) -> (ColorScheme, Vec<String>) {
+        let mut warnings = Vec::new();
+        let mut scheme = match ColorScheme::from_named(&self.theme) {
+            Some(s) => s,
+            None => {
+                warnings.push(format!(
+                    "skin: unknown theme '{}', falling back to 'modern-dark'",
+                    self.theme
+                ));
+                ColorScheme::modern_dark()
+            }
+        };
+        for (key, value) in &self.colors {
+            if let Err(msg) = apply_override(&mut scheme, key, value) {
+                warnings.push(format!("skin: {msg}"));
+            }
+        }
+        (scheme, warnings)
     }
 }
 
-/// Backend-neutral color enum so [`mc-config`] doesn't depend on ratatui.
+/// 24-bit RGB color, or "use the terminal's default".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AnsiColor {
-    Black,
-    Red,
-    Green,
-    Yellow,
-    Blue,
-    Magenta,
-    Cyan,
-    White,
-    DarkGray,
-    LightRed,
-    LightGreen,
-    LightYellow,
-    LightBlue,
-    LightMagenta,
-    LightCyan,
+pub enum ThemeColor {
+    Rgb(u8, u8, u8),
+    Reset,
+}
+
+impl ThemeColor {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self::Rgb(r, g, b)
+    }
+}
+
+/// Parse a color string. Accepts `#rrggbb`, `#rgb`, or `reset`/`default`.
+///
+/// # Errors
+/// Returns a human-readable message if the string is not a recognised form.
+pub fn parse_color(s: &str) -> Result<ThemeColor, String> {
+    let t = s.trim();
+    let lower = t.to_ascii_lowercase();
+    if lower == "reset" || lower == "default" {
+        return Ok(ThemeColor::Reset);
+    }
+    let hex = t.strip_prefix('#').ok_or_else(|| {
+        format!("color '{s}' must be #rrggbb, #rgb, or 'reset'")
+    })?;
+    match hex.len() {
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).map_err(|e| e.to_string())?;
+            let g = u8::from_str_radix(&hex[2..4], 16).map_err(|e| e.to_string())?;
+            let b = u8::from_str_radix(&hex[4..6], 16).map_err(|e| e.to_string())?;
+            Ok(ThemeColor::Rgb(r, g, b))
+        }
+        3 => {
+            let parse_nib = |c: char| -> Result<u8, String> {
+                c.to_digit(16)
+                    .map(|n| (n as u8) * 0x11)
+                    .ok_or_else(|| format!("invalid hex digit '{c}'"))
+            };
+            let mut chars = hex.chars();
+            let r = parse_nib(chars.next().unwrap())?;
+            let g = parse_nib(chars.next().unwrap())?;
+            let b = parse_nib(chars.next().unwrap())?;
+            Ok(ThemeColor::Rgb(r, g, b))
+        }
+        _ => Err(format!("color '{s}' must be #rrggbb or #rgb")),
+    }
 }
 
 #[cfg(test)]
@@ -153,34 +134,92 @@ mod tests {
     #[test]
     fn defaults() {
         let s = SkinFile::default();
-        assert_eq!(s.panel.background, "blue");
-        assert_eq!(s.groups.get("archive").map(String::as_str), Some("red"));
+        assert_eq!(s.theme, "modern-dark");
+        assert!(s.colors.is_empty());
     }
 
     #[test]
     fn parse_partial_keeps_defaults() {
         let s = SkinFile::from_toml(
             r#"
-            [panel]
-            background = "black"
+            theme = "tokyo-night"
             "#,
         )
         .unwrap();
-        assert_eq!(s.panel.background, "black");
-        // Other panel fields keep defaults.
-        assert_eq!(s.panel.cursor_bg, "cyan");
+        assert_eq!(s.theme, "tokyo-night");
+        assert!(s.colors.is_empty());
+    }
+
+    #[test]
+    fn parse_with_overrides() {
+        let s = SkinFile::from_toml(
+            r##"
+            theme = "modern-dark"
+            [colors]
+            panel_bg  = "#101018"
+            cursor_bg = "#ffaf00"
+            "##,
+        )
+        .unwrap();
+        assert_eq!(s.colors.get("panel_bg").map(String::as_str), Some("#101018"));
     }
 
     #[test]
     fn missing_file_yields_default() {
-        let s = SkinFile::load(std::path::Path::new("/no/such/path.toml")).unwrap();
-        assert_eq!(s.panel.background, "blue");
+        let s = SkinFile::load(Path::new("/no/such/path.toml")).unwrap();
+        assert_eq!(s.theme, "modern-dark");
     }
 
     #[test]
-    fn color_parser() {
-        assert_eq!(parse_color_name("Cyan"), AnsiColor::Cyan);
-        assert_eq!(parse_color_name("lightblue"), AnsiColor::LightBlue);
-        assert_eq!(parse_color_name("nope"), AnsiColor::White);
+    fn parse_color_hex() {
+        assert_eq!(parse_color("#1e1e2e"), Ok(ThemeColor::Rgb(0x1e, 0x1e, 0x2e)));
+        assert_eq!(parse_color("#FFF"), Ok(ThemeColor::Rgb(0xff, 0xff, 0xff)));
+        assert_eq!(parse_color("  #abc  "), Ok(ThemeColor::Rgb(0xaa, 0xbb, 0xcc)));
+        assert_eq!(parse_color("reset"), Ok(ThemeColor::Reset));
+        assert_eq!(parse_color("Default"), Ok(ThemeColor::Reset));
+        assert!(parse_color("blue").is_err());
+        assert!(parse_color("#zz0000").is_err());
+        assert!(parse_color("#1234").is_err());
+    }
+
+    #[test]
+    fn resolve_default_theme() {
+        let s = SkinFile::default();
+        let (scheme, warnings) = s.resolve();
+        assert!(warnings.is_empty());
+        assert_eq!(scheme.panel_bg, ColorScheme::modern_dark().panel_bg);
+    }
+
+    #[test]
+    fn resolve_unknown_theme_warns() {
+        let mut s = SkinFile::default();
+        s.theme = "no-such-theme".into();
+        let (_, warnings) = s.resolve();
+        assert!(warnings.iter().any(|w| w.contains("unknown theme")));
+    }
+
+    #[test]
+    fn resolve_applies_override() {
+        let mut s = SkinFile::default();
+        s.colors.insert("panel_bg".into(), "#010203".into());
+        let (scheme, warnings) = s.resolve();
+        assert!(warnings.is_empty());
+        assert_eq!(scheme.panel_bg, ThemeColor::Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn resolve_unknown_field_warns() {
+        let mut s = SkinFile::default();
+        s.colors.insert("not_a_field".into(), "#000000".into());
+        let (_, warnings) = s.resolve();
+        assert!(warnings.iter().any(|w| w.contains("not_a_field")));
+    }
+
+    #[test]
+    fn resolve_bad_color_warns() {
+        let mut s = SkinFile::default();
+        s.colors.insert("panel_bg".into(), "puce".into());
+        let (_, warnings) = s.resolve();
+        assert!(warnings.iter().any(|w| w.contains("panel_bg")));
     }
 }

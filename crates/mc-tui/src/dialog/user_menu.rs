@@ -3,14 +3,16 @@
 //! Phase 11 first cut: ships a built-in default menu. Future work loads
 //! `~/.config/mc-rs/menu.toml` and merges with defaults.
 
+use mc_config::ColorScheme;
 use mc_core::key::{KeyChord, KeyCode};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{centered_rect, Dialog, DialogOutcome};
+use crate::theme::rtc;
 
 #[derive(Debug, Clone)]
 pub struct UserMenuEntry {
@@ -43,14 +45,18 @@ impl UserMenuDialog {
 impl Dialog for UserMenuDialog {
     type Output = String; // emitted shell template (pre-macro-substitution)
 
-    fn render(&self, f: &mut Frame<'_>, area: Rect) {
+    fn render(&self, f: &mut Frame<'_>, area: Rect, scheme: &ColorScheme) {
         let rect = centered_rect(70, 14, area);
         f.render_widget(Clear, rect);
+        let dlg = Style::default().fg(rtc(scheme.dialog_fg)).bg(rtc(scheme.dialog_bg));
         let block = Block::default()
-            .title(" User menu ")
+            .title(Span::styled(
+                " User menu ",
+                Style::default().fg(rtc(scheme.dialog_title_fg)).add_modifier(Modifier::BOLD),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Cyan))
-            .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+            .border_style(Style::default().fg(rtc(scheme.dialog_border)).bg(rtc(scheme.dialog_bg)))
+            .style(dlg);
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
@@ -60,9 +66,9 @@ impl Dialog for UserMenuDialog {
             .enumerate()
             .map(|(i, e)| {
                 let style = if i == self.cursor {
-                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default().fg(rtc(scheme.dialog_focus_fg)).bg(rtc(scheme.dialog_focus_bg)).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                    dlg
                 };
                 Line::from(vec![
                     Span::styled(format!("  {}  ", e.hotkey), style),
@@ -71,7 +77,7 @@ impl Dialog for UserMenuDialog {
                 ])
             })
             .collect();
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines).style(dlg), inner);
     }
 
     fn handle_key(&mut self, chord: KeyChord) -> DialogOutcome<String> {
