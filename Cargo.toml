@@ -38,7 +38,7 @@ ratatui = "0.30"
 ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-russh = { version = "0.54", default-features = false, features = ["ring", "flate2"] }
+russh = { version = "0.60", default-features = false, features = ["ring", "flate2"] }
 russh-sftp = "2"
 sevenz-rust2 = { version = "0.18", default-features = false }
 serde = { version = "1", features = ["derive"] }
