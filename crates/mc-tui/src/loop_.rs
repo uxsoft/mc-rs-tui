@@ -404,20 +404,28 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             app.refresh_active().await;
         }
-        PendingOp::SubmitCopy { sources, dst_dir } => {
+        PendingOp::SubmitCopy {
+            sources,
+            dst_dir,
+            opts,
+        } => {
             let Some((src_vfs, dst_vfs)) = pick_src_dst(app, sources.first(), &dst_dir) else {
                 return;
             };
-            let job = CopyJob::new(src_vfs, dst_vfs, sources, dst_dir);
+            let job = CopyJob::new(src_vfs, dst_vfs, sources, dst_dir, opts);
             let desc = job.description_for_dialog();
             let handle = app.jobs.submit(Box::new(job));
             app.show_progress(handle, desc);
         }
-        PendingOp::SubmitMove { sources, dst_dir } => {
+        PendingOp::SubmitMove {
+            sources,
+            dst_dir,
+            opts,
+        } => {
             let Some((src_vfs, dst_vfs)) = pick_src_dst(app, sources.first(), &dst_dir) else {
                 return;
             };
-            let job = MoveJob::new(src_vfs, dst_vfs, sources, dst_dir);
+            let job = MoveJob::new(src_vfs, dst_vfs, sources, dst_dir, opts);
             let desc = job.description_for_dialog();
             let handle = app.jobs.submit(Box::new(job));
             app.show_progress(handle, desc);

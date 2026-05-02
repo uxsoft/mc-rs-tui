@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mc_core::action::SortKey;
 use mc_core::{Entry, EntryKind, VPath};
 
-use crate::dialog::{ConfirmDialog, InputDialog};
+use crate::dialog::{ConfirmDialog, CopyMoveSettingsDialog};
 use crate::panel::{ListingMode, PanelState};
 
 use super::{App, CopyMoveKind, Disposition, Modal, PendingOp};
@@ -253,7 +253,12 @@ impl App {
         let prefilled = display_dst(&dst_dir);
         let src_cwd = self.active_ref().cwd.clone();
         self.modal = Modal::CopyMove {
-            dlg: InputDialog::new(kind.title(), &prompt, prefilled),
+            dlg: CopyMoveSettingsDialog::new(
+                kind.title(),
+                &prompt,
+                prefilled,
+                mc_jobs::CopyOptions::default(),
+            ),
             sources,
             src_cwd,
             kind,

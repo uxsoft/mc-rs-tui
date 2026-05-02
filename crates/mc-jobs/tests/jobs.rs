@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use mc_core::VPath;
-use mc_jobs::{CopyJob, DeleteJob, Job, JobCtx, JobOutcome, JobUpdateKind};
+use mc_jobs::{CopyJob, CopyOptions, DeleteJob, Job, JobCtx, JobOutcome, JobUpdateKind};
 use mc_vfs::local::LocalVfs;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -28,7 +28,13 @@ async fn copy_recursive_local() {
     ];
     let dst_dir = VPath::local(dst.path().to_path_buf());
 
-    let mut job = CopyJob::new(vfs.clone(), vfs.clone(), sources, dst_dir);
+    let mut job = CopyJob::new(
+        vfs.clone(),
+        vfs.clone(),
+        sources,
+        dst_dir,
+        CopyOptions::default(),
+    );
     let (tx, mut rx) = mpsc::channel(64);
     let ctx = JobCtx {
         id: mc_jobs::JobId(1),
@@ -97,7 +103,13 @@ async fn copy_cancel_stops_early() {
         .collect();
     let dst_dir = VPath::local(dst.path().to_path_buf());
 
-    let mut job = CopyJob::new(vfs.clone(), vfs.clone(), sources, dst_dir);
+    let mut job = CopyJob::new(
+        vfs.clone(),
+        vfs.clone(),
+        sources,
+        dst_dir,
+        CopyOptions::default(),
+    );
     let (tx, mut rx) = mpsc::channel(64);
     let cancel = CancellationToken::new();
     let ctx = JobCtx {

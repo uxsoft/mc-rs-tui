@@ -2,7 +2,7 @@ pub mod copy;
 pub mod delete;
 pub mod r#move;
 
-pub use copy::CopyJob;
+pub use copy::{CopyJob, CopyOptions};
 pub use delete::DeleteJob;
 pub use r#move::MoveJob;
 

@@ -1,6 +1,3 @@
 - Streamline the user experience for copying, moving, deleting, ...
-- https://github.com/sxyazi/yazi
-  - icons
-  - image preview using F3
-  - F3 preview using cat / bat inside a dialog
 - / (slash) to trigger a search
+- Packaging / publishing - crates.io?

@@ -10,8 +10,8 @@ use mc_core::key::{KeyChord, KeyCode};
 use ratatui::layout::Rect;
 
 use crate::dialog::{
-    Dialog, DialogOutcome, FindFormOutcome, FindResultsOutcome, HotlistAction, HotlistDialog,
-    InputDialog,
+    CopyMoveSettingsDialog, Dialog, DialogOutcome, FindFormOutcome, FindResultsOutcome,
+    HotlistAction, HotlistDialog, InputDialog,
 };
 use crate::panel::ListingMode;
 
@@ -266,16 +266,33 @@ impl App {
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
-                DialogOutcome::Submitted(input) => match parse_dst(&input, &src_cwd) {
+                DialogOutcome::Submitted(settings) => match parse_dst(&settings.dst, &src_cwd) {
                     Some(dst_dir) => Disposition::RunOp(match kind {
-                        CopyMoveKind::Copy => PendingOp::SubmitCopy { sources, dst_dir },
-                        CopyMoveKind::Move => PendingOp::SubmitMove { sources, dst_dir },
+                        CopyMoveKind::Copy => PendingOp::SubmitCopy {
+                            sources,
+                            dst_dir,
+                            opts: settings.opts,
+                        },
+                        CopyMoveKind::Move => PendingOp::SubmitMove {
+                            sources,
+                            dst_dir,
+                            opts: settings.opts,
+                        },
                     }),
                     None => {
-                        self.set_status(format!("{}: invalid destination: {input}", kind.verb()));
+                        self.set_status(format!(
+                            "{}: invalid destination: {}",
+                            kind.verb(),
+                            settings.dst
+                        ));
                         let prompt = format!("{} to:", kind.verb());
                         self.modal = Modal::CopyMove {
-                            dlg: InputDialog::new(kind.title(), &prompt, input),
+                            dlg: CopyMoveSettingsDialog::new(
+                                kind.title(),
+                                &prompt,
+                                settings.dst,
+                                settings.opts,
+                            ),
                             sources,
                             src_cwd,
                             kind,

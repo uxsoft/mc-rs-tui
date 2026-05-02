@@ -9,12 +9,33 @@ use crate::trait_::{Job, JobCtx, JobOutcome, Progress};
 
 use super::child_of;
 
+/// Per-job options for copy / move. Surfaced to the UI as a settings
+/// dialog before the operation begins.
+#[derive(Debug, Clone, Copy)]
+pub struct CopyOptions {
+    pub overwrite: bool,
+    /// Placeholder: not yet consumed by the recursive walker.
+    pub preserve_attrs: bool,
+    /// Placeholder: not yet consumed by the recursive walker.
+    pub follow_symlinks: bool,
+}
+
+impl Default for CopyOptions {
+    fn default() -> Self {
+        Self {
+            overwrite: true,
+            preserve_attrs: true,
+            follow_symlinks: false,
+        }
+    }
+}
+
 pub struct CopyJob {
     src_vfs: Arc<dyn Vfs>,
     dst_vfs: Arc<dyn Vfs>,
     sources: Vec<VPath>,
     dst_dir: VPath,
-    overwrite: bool,
+    opts: CopyOptions,
 }
 
 impl CopyJob {
@@ -24,13 +45,14 @@ impl CopyJob {
         dst_vfs: Arc<dyn Vfs>,
         sources: Vec<VPath>,
         dst_dir: VPath,
+        opts: CopyOptions,
     ) -> Self {
         Self {
             src_vfs,
             dst_vfs,
             sources,
             dst_dir,
-            overwrite: true,
+            opts,
         }
     }
 }
@@ -65,7 +87,7 @@ impl Job for CopyJob {
                 &src,
                 self.dst_vfs.as_ref(),
                 &dst,
-                self.overwrite,
+                self.opts.overwrite,
                 &ctx,
                 &mut state,
             )

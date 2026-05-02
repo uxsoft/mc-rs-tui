@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use mc_core::{Result, VPath};
 use mc_vfs::Vfs;
 
-use crate::ops::copy::CopyJob;
+use crate::ops::copy::{CopyJob, CopyOptions};
 use crate::ops::delete::DeleteJob;
 use crate::trait_::{Job, JobCtx, JobOutcome};
 
@@ -15,6 +15,7 @@ pub struct MoveJob {
     dst_vfs: Arc<dyn Vfs>,
     sources: Vec<VPath>,
     dst_dir: VPath,
+    opts: CopyOptions,
 }
 
 impl MoveJob {
@@ -24,12 +25,14 @@ impl MoveJob {
         dst_vfs: Arc<dyn Vfs>,
         sources: Vec<VPath>,
         dst_dir: VPath,
+        opts: CopyOptions,
     ) -> Self {
         Self {
             src_vfs,
             dst_vfs,
             sources,
             dst_dir,
+            opts,
         }
     }
 }
@@ -87,6 +90,7 @@ impl Job for MoveJob {
             self.dst_vfs.clone(),
             copy_sources.clone(),
             self.dst_dir.clone(),
+            self.opts,
         );
         let copy_ctx = JobCtx {
             id: ctx.id,

@@ -30,13 +30,14 @@ use mc_config::{
 };
 use mc_core::key::{KeyChord, KeyCode, KeyMods};
 use mc_core::{Entry, EntryKind, VPath};
-use mc_jobs::{JobQueue, JobUpdateRx};
+use mc_jobs::{CopyOptions, JobQueue, JobUpdateRx};
 use mc_vfs::{Registry, Vfs};
 use ratatui::layout::Rect;
 use tracing::warn;
 
 use crate::dialog::{
-    ConfirmDialog, FindForm, FindResults, HotlistDialog, InputDialog, MenuBar, ProgressDialog,
+    ConfirmDialog, CopyMoveSettingsDialog, FindForm, FindResults, HotlistDialog, InputDialog,
+    MenuBar, ProgressDialog,
 };
 use crate::panel::PanelState;
 
@@ -94,11 +95,13 @@ pub enum PendingOp {
     SubmitCopy {
         sources: Vec<VPath>,
         dst_dir: VPath,
+        opts: CopyOptions,
     },
     /// Submit a recursive move job.
     SubmitMove {
         sources: Vec<VPath>,
         dst_dir: VPath,
+        opts: CopyOptions,
     },
     /// Submit a recursive delete job.
     SubmitDelete {
@@ -228,11 +231,11 @@ pub(super) enum Modal {
     None,
     Mkdir(InputDialog),
     DeleteConfirm(ConfirmDialog, Vec<VPath>),
-    /// MC-style "Copy to:" / "Move to:" prompt. Sources collected at F5/F6
-    /// time; on Enter the destination is parsed and the corresponding job
-    /// is submitted. `kind` selects Copy vs Move.
+    /// MC-style "Copy to:" / "Move to:" settings dialog. Sources collected at
+    /// F5/F6 time; on Enter the destination is parsed and the corresponding
+    /// job is submitted with the chosen options. `kind` selects Copy vs Move.
     CopyMove {
-        dlg: InputDialog,
+        dlg: CopyMoveSettingsDialog,
         sources: Vec<VPath>,
         src_cwd: VPath,
         kind: CopyMoveKind,
@@ -511,10 +514,16 @@ impl App {
                 mc_jobs::JobUpdateKind::Status(s) => dlg.status = s,
                 mc_jobs::JobUpdateKind::Log(_) => {}
                 mc_jobs::JobUpdateKind::Finished(o) => {
-                    let dismiss = matches!(o, mc_jobs::JobOutcome::Success);
+                    let desc = dlg.description.clone();
+                    let status_msg = match &o {
+                        mc_jobs::JobOutcome::Success => None,
+                        mc_jobs::JobOutcome::Cancelled => Some(format!("{desc}: cancelled")),
+                        mc_jobs::JobOutcome::Failed(e) => Some(format!("{desc} failed: {e}")),
+                    };
                     dlg.finished = Some(o);
-                    if dismiss {
-                        self.modal = Modal::None;
+                    self.modal = Modal::None;
+                    if let Some(s) = status_msg {
+                        self.set_status(s);
                     }
                 }
             }

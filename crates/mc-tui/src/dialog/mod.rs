@@ -1,6 +1,7 @@
 //! Lightweight modal dialogs (confirm, input).
 
 pub mod confirm;
+pub mod copy_move;
 pub mod find;
 pub mod help;
 pub mod hotlist;
@@ -23,6 +24,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 pub use confirm::ConfirmDialog;
+pub use copy_move::{CopyMoveSettings, CopyMoveSettingsDialog};
 pub use find::{FindForm, FindFormOutcome, FindParams, FindResults, FindResultsOutcome};
 pub use help::HelpDialog;
 pub use hotlist::{HotlistAction, HotlistDialog};
