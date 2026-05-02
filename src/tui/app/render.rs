@@ -85,7 +85,7 @@ impl App {
         let scheme = &self.scheme;
         match &mut self.modal {
             Modal::None | Modal::PrefixCtrlX | Modal::Menu => {}
-            Modal::Mkdir(d) | Modal::Rename(d, _) => d.render(f, area, scheme),
+            Modal::Mkdir(d) => d.render(f, area, scheme),
             Modal::CopyMove { dlg, .. } => dlg.render(f, area, scheme),
             Modal::SelectGroup { dlg, .. } | Modal::Chmod { dlg, .. } => {
                 dlg.render(f, area, scheme)
@@ -120,6 +120,7 @@ impl App {
             Modal::Layout(d) => d.render(f, area, scheme),
             Modal::Theme(d) => d.render(f, area, scheme),
             Modal::QuitConfirm(d) => d.render(f, area, scheme),
+            Modal::Error(d) => d.render(f, area, scheme),
         }
         if menu_focused {
             let body = Rect::new(

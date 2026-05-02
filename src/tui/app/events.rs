@@ -525,28 +525,11 @@ impl App {
                 return Disposition::RunOp(PendingOp::BulkRename { parent, sources });
             }
 
-            // F6 — single-cursored entry → rename, otherwise → move.
+            // F6 — open the unified Move dialog (matches mc: same dialog
+            // for single-file rename, single-file move, and multi-file move).
             (KeyCode::F(6), m) if m.is_empty() => {
                 let sources = self.selected_targets();
                 if sources.is_empty() {
-                    return Disposition::None;
-                }
-                if sources.len() == 1 && self.active_ref().marks.is_empty() {
-                    let entry = self
-                        .active_ref()
-                        .entries
-                        .get(self.active_ref().cursor)
-                        .cloned();
-                    let src = sources.into_iter().next().unwrap();
-                    if let Some(e) = entry {
-                        if e.name != ".." {
-                            self.modal = Modal::Rename(
-                                InputDialog::new(" Rename ", "New name:", e.name),
-                                src,
-                            );
-                            return Disposition::Redraw;
-                        }
-                    }
                     return Disposition::None;
                 }
                 self.open_copy_move_with(sources, CopyMoveKind::Move)

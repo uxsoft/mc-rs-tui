@@ -246,11 +246,21 @@ impl App {
             self.left.cwd.clone()
         };
         let prompt = if sources.len() == 1 {
-            format!("{} {} to:", kind.verb(), display_basename(&sources[0]))
+            format!("{} \"{}\" to:", kind.verb(), display_basename(&sources[0]))
         } else {
             format!("{} {} items to:", kind.verb(), sources.len())
         };
-        let prefilled = display_dst(&dst_dir);
+        // Single-source prefill includes the source basename so the user
+        // can edit just the filename (rename) or replace the directory
+        // portion (move) — matching mc's behavior. Multi-source keeps the
+        // bare directory prefill since the destination must be a directory.
+        let prefilled = if sources.len() == 1 {
+            let base = display_basename(&sources[0]);
+            let dir = display_dst(&dst_dir);
+            join_with_slash(&dir, &base)
+        } else {
+            ensure_trailing_slash(display_dst(&dst_dir))
+        };
         let src_cwd = self.active_ref().cwd.clone();
         self.modal = Modal::CopyMove {
             dlg: CopyMoveSettingsDialog::new(
@@ -347,10 +357,42 @@ pub(super) fn display_basename(p: &VPath) -> String {
         .unwrap_or_else(|| p.to_string())
 }
 
+/// Join `dir` and `name` with a single `/`. Used to prefill the Copy/Move
+/// dialog with `<other_panel>/<basename>` for single-source operations.
+pub(super) fn join_with_slash(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        return name.to_string();
+    }
+    if dir.ends_with('/') || dir.ends_with('\\') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Ensure the directory string ends with a slash so the resolver treats
+/// it as a directory rather than as a same-named file.
+pub(super) fn ensure_trailing_slash(mut s: String) -> String {
+    if !s.ends_with('/') && !s.ends_with('\\') {
+        s.push('/');
+    }
+    s
+}
+
+/// True when the destination string was typed with a trailing path
+/// separator — caller should treat the path as a directory and not
+/// split off a basename for rename.
+#[must_use]
+pub fn dst_input_is_dir(s: &str) -> bool {
+    let t = s.trim_end();
+    t.ends_with('/') || t.ends_with('\\')
+}
+
 /// Parse the destination string from the Copy/Move dialog into a `VPath`.
-/// Accepts: full VPath strings (`local:/x`, `sftp://h/p`); absolute local
+/// Accepts: full `VPath` strings (`local:/x`, `sftp://h/p`); absolute local
 /// paths (`/x`); paths relative to `src_cwd` when that cwd is local.
-pub(super) fn parse_dst(input: &str, src_cwd: &VPath) -> Option<VPath> {
+#[must_use]
+pub fn parse_dst(input: &str, src_cwd: &VPath) -> Option<VPath> {
     let s = input.trim();
     if s.is_empty() {
         return None;

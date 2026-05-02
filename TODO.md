@@ -1,3 +1,4 @@
-- Streamline the user experience for copying, moving, deleting, ...
 - / (slash) to trigger a search
-- Packaging / publishing - crates.io?
+- Windows build
+- Unobtrusive errors
+- Job log

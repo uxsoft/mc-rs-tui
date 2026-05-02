@@ -35,6 +35,10 @@ pub struct CopyJob {
     dst_vfs: Arc<dyn Vfs>,
     sources: Vec<VPath>,
     dst_dir: VPath,
+    /// When set with exactly one source, the file is copied to
+    /// `dst_dir/target_name` instead of `dst_dir/<src_basename>`. Allows
+    /// a single Copy/Move dialog to combine copy + rename, matching mc.
+    target_name: Option<String>,
     opts: CopyOptions,
 }
 
@@ -52,8 +56,18 @@ impl CopyJob {
             dst_vfs,
             sources,
             dst_dir,
+            target_name: None,
             opts,
         }
+    }
+
+    /// Override the destination basename. Only honored when there is
+    /// exactly one source — for multi-source copies the destination must
+    /// be a directory and per-source basenames are kept.
+    #[must_use]
+    pub fn with_target_name(mut self, name: Option<String>) -> Self {
+        self.target_name = name;
+        self
     }
 }
 
@@ -79,8 +93,12 @@ impl Job for CopyJob {
         state.items_done = 0;
         state.bytes_done = 0;
 
+        let single = self.sources.len() == 1;
         for src in self.sources.clone() {
-            let name = file_name(&src)?;
+            let name = match &self.target_name {
+                Some(n) if single => n.clone(),
+                _ => file_name(&src)?,
+            };
             let dst = child_of(&self.dst_dir, &name)?;
             if let Err(e) = copy_recursive(
                 self.src_vfs.as_ref(),

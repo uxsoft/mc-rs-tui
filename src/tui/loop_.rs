@@ -19,7 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
-use crate::tui::app::{App, Disposition, PendingOp};
+use crate::tui::app::{App, Disposition, PendingOp, dst_input_is_dir, parse_dst};
 use crate::tui::editor_spawn::{resolve_editor, spawn_editor};
 use crate::tui::event::chord_from_crossterm;
 use crate::tui::watcher::PanelWatcher;
@@ -417,27 +417,6 @@ async fn run_op<B: ratatui::backend::Backend>(
             }
             app.refresh_active().await;
         }
-        PendingOp::Rename { src, new_name } => {
-            let vfs = match app.registry.root_for(&src) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("rename: no backend: {e}");
-                    return;
-                }
-            };
-            let parent = match parent_of(&src) {
-                Some(p) => p,
-                None => return,
-            };
-            let dst = match VPath::child(&parent, &new_name) {
-                Some(t) => t,
-                None => return,
-            };
-            if let Err(e) = vfs.rename(&src, &dst).await {
-                tracing::warn!("rename failed: {e}");
-            }
-            app.refresh_active().await;
-        }
         PendingOp::Chmod { targets, mode } => {
             for t in targets {
                 let vfs = match app.registry.root_for(&t) {
@@ -455,26 +434,46 @@ async fn run_op<B: ratatui::backend::Backend>(
         }
         PendingOp::SubmitCopy {
             sources,
-            dst_dir,
+            dst_input,
+            src_cwd,
             opts,
         } => {
+            let (dst_dir, dst_name) =
+                match resolve_copy_move_dst(app, &sources, &dst_input, &src_cwd).await {
+                    Ok(t) => t,
+                    Err(msg) => {
+                        app.set_status(format!("Copy: {msg}"));
+                        return;
+                    }
+                };
             let Some((src_vfs, dst_vfs)) = pick_src_dst(app, sources.first(), &dst_dir) else {
                 return;
             };
-            let job = CopyJob::new(src_vfs, dst_vfs, sources, dst_dir, opts);
+            let job =
+                CopyJob::new(src_vfs, dst_vfs, sources, dst_dir, opts).with_target_name(dst_name);
             let desc = job.description_for_dialog();
             let handle = app.jobs.submit(Box::new(job));
             queue_progress_dialog(pending_progress, handle, desc);
         }
         PendingOp::SubmitMove {
             sources,
-            dst_dir,
+            dst_input,
+            src_cwd,
             opts,
         } => {
+            let (dst_dir, dst_name) =
+                match resolve_copy_move_dst(app, &sources, &dst_input, &src_cwd).await {
+                    Ok(t) => t,
+                    Err(msg) => {
+                        app.set_status(format!("Move: {msg}"));
+                        return;
+                    }
+                };
             let Some((src_vfs, dst_vfs)) = pick_src_dst(app, sources.first(), &dst_dir) else {
                 return;
             };
-            let job = MoveJob::new(src_vfs, dst_vfs, sources, dst_dir, opts);
+            let job =
+                MoveJob::new(src_vfs, dst_vfs, sources, dst_dir, opts).with_target_name(dst_name);
             let desc = job.description_for_dialog();
             let handle = app.jobs.submit(Box::new(job));
             queue_progress_dialog(pending_progress, handle, desc);
@@ -1073,6 +1072,49 @@ fn pick_src_dst(
         }
     };
     Some((src_vfs, dst_vfs))
+}
+
+/// Resolve the raw destination string from the Copy/Move dialog into a
+/// `(dst_dir, dst_name)` pair. `dst_name = None` means "directory" — each
+/// source keeps its basename. `dst_name = Some(_)` is only valid when there
+/// is exactly one source and means combined move/copy + rename.
+///
+/// Disambiguation:
+/// - empty input → error.
+/// - input ending with `/` (or `\`) → directory.
+/// - multi-source → must be a directory.
+/// - single source: stat the parsed path; if it exists as a directory →
+///   directory; otherwise → split into `(parent, basename)` for rename.
+async fn resolve_copy_move_dst(
+    app: &App,
+    sources: &[VPath],
+    dst_input: &str,
+    src_cwd: &VPath,
+) -> Result<(VPath, Option<String>), String> {
+    let Some(parsed) = parse_dst(dst_input, src_cwd) else {
+        return Err(format!("invalid destination: {dst_input}"));
+    };
+    let trailing_slash = dst_input_is_dir(dst_input);
+    if sources.len() != 1 || trailing_slash {
+        return Ok((parsed, None));
+    }
+    let dst_vfs = match app.registry.root_for(&parsed) {
+        Ok(v) => v,
+        Err(e) => return Err(format!("no backend: {e}")),
+    };
+    if let Ok(entry) = dst_vfs.stat(&parsed).await {
+        if entry.is_dir() {
+            return Ok((parsed, None));
+        }
+    }
+    let basename = parsed
+        .last()
+        .and_then(|l| l.sub.file_name().map(|s| s.to_string_lossy().into_owned()));
+    let parent = parent_of(&parsed);
+    match (parent, basename) {
+        (Some(p), Some(name)) => Ok((p, Some(name))),
+        _ => Ok((parsed, None)),
+    }
 }
 
 fn parent_of(p: &VPath) -> Option<VPath> {

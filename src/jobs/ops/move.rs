@@ -15,6 +15,10 @@ pub struct MoveJob {
     dst_vfs: Arc<dyn Vfs>,
     sources: Vec<VPath>,
     dst_dir: VPath,
+    /// When set with exactly one source, the entry is renamed to
+    /// `dst_dir/target_name` rather than keeping the source's basename.
+    /// Lets a single F6 dialog combine move + rename, matching mc.
+    target_name: Option<String>,
     opts: CopyOptions,
 }
 
@@ -32,8 +36,17 @@ impl MoveJob {
             dst_vfs,
             sources,
             dst_dir,
+            target_name: None,
             opts,
         }
+    }
+
+    /// Override the destination basename. Only honored when there is
+    /// exactly one source.
+    #[must_use]
+    pub fn with_target_name(mut self, name: Option<String>) -> Self {
+        self.target_name = name;
+        self
     }
 }
 
@@ -50,25 +63,22 @@ impl Job for MoveJob {
     async fn run(&mut self, ctx: JobCtx) -> Result<JobOutcome> {
         // Try same-VFS rename fast path per source. Fall back to copy+delete.
         let same_vfs = Arc::ptr_eq(&self.src_vfs, &self.dst_vfs);
+        let single = self.sources.len() == 1;
         let mut copy_sources: Vec<VPath> = Vec::new();
         for src in &self.sources {
             if same_vfs {
-                let name = match src
-                    .last()
-                    .and_then(|l| l.sub.file_name().map(|s| s.to_string_lossy().into_owned()))
-                {
-                    Some(n) => n,
-                    None => {
-                        copy_sources.push(src.clone());
-                        continue;
-                    }
+                let override_name = self.target_name.as_deref().filter(|_| single);
+                let basename = override_name.map(str::to_string).or_else(|| {
+                    src.last()
+                        .and_then(|l| l.sub.file_name().map(|s| s.to_string_lossy().into_owned()))
+                });
+                let Some(name) = basename else {
+                    copy_sources.push(src.clone());
+                    continue;
                 };
-                let dst = match child_of(&self.dst_dir, &name) {
-                    Ok(d) => d,
-                    Err(_) => {
-                        copy_sources.push(src.clone());
-                        continue;
-                    }
+                let Ok(dst) = child_of(&self.dst_dir, &name) else {
+                    copy_sources.push(src.clone());
+                    continue;
                 };
                 ctx.report_status(format!("rename {name}")).await;
                 if self.src_vfs.rename(src, &dst).await.is_ok() {
@@ -85,13 +95,19 @@ impl Job for MoveJob {
             return Ok(JobOutcome::Cancelled);
         }
 
+        let copy_target_name = if single {
+            self.target_name.clone()
+        } else {
+            None
+        };
         let mut copy = CopyJob::new(
             self.src_vfs.clone(),
             self.dst_vfs.clone(),
             copy_sources.clone(),
             self.dst_dir.clone(),
             self.opts,
-        );
+        )
+        .with_target_name(copy_target_name);
         let copy_ctx = JobCtx {
             id: ctx.id,
             progress: ctx.progress.clone(),

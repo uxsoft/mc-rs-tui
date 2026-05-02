@@ -2,6 +2,7 @@
 
 pub mod confirm;
 pub mod copy_move;
+pub mod error;
 pub mod find;
 pub mod help;
 pub mod hotlist;
@@ -25,6 +26,7 @@ use ratatui::layout::Rect;
 
 pub use confirm::ConfirmDialog;
 pub use copy_move::{CopyMoveSettings, CopyMoveSettingsDialog};
+pub use error::ErrorDialog;
 pub use find::{FindForm, FindFormOutcome, FindParams, FindResults, FindResultsOutcome};
 pub use help::HelpDialog;
 pub use hotlist::{HotlistAction, HotlistDialog};

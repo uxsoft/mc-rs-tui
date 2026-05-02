@@ -7,11 +7,11 @@ use crate::core::VPath;
 use crate::core::key::{KeyChord, KeyCode, KeyMods};
 
 use crate::tui::dialog::{
-    CopyMoveSettingsDialog, Dialog, DialogOutcome, FindForm, FindFormOutcome, FindParams,
-    FindResultsOutcome, HotlistAction, HotlistDialog, InputDialog, MenuChoice, MenuDialog,
+    Dialog, DialogOutcome, FindForm, FindFormOutcome, FindParams, FindResultsOutcome,
+    HotlistAction, HotlistDialog, InputDialog, MenuChoice, MenuDialog,
 };
 
-use super::ops::{default_link_name, parse_chown, parse_dst, parse_octal_mode, vpath_to_local};
+use super::ops::{default_link_name, parse_chown, parse_octal_mode, vpath_to_local};
 use super::{App, CopyMoveKind, Disposition, Modal, PendingOp};
 
 impl App {
@@ -74,50 +74,20 @@ impl App {
                     Disposition::Redraw
                 }
                 DialogOutcome::Cancelled => Disposition::Redraw,
-                DialogOutcome::Submitted(settings) => match parse_dst(&settings.dst, &src_cwd) {
-                    Some(dst_dir) => Disposition::RunOp(match kind {
-                        CopyMoveKind::Copy => PendingOp::SubmitCopy {
-                            sources,
-                            dst_dir,
-                            opts: settings.opts,
-                        },
-                        CopyMoveKind::Move => PendingOp::SubmitMove {
-                            sources,
-                            dst_dir,
-                            opts: settings.opts,
-                        },
-                    }),
-                    None => {
-                        self.set_status(format!(
-                            "{}: invalid destination: {}",
-                            kind.verb(),
-                            settings.dst
-                        ));
-                        let prompt = format!("{} to:", kind.verb());
-                        self.modal = Modal::CopyMove {
-                            dlg: CopyMoveSettingsDialog::new(
-                                kind.title(),
-                                &prompt,
-                                settings.dst,
-                                settings.opts,
-                            ),
-                            sources,
-                            src_cwd,
-                            kind,
-                        };
-                        Disposition::Redraw
-                    }
-                },
-            },
-            Modal::Rename(mut dlg, src) => match dlg.handle_key(chord) {
-                DialogOutcome::None => {
-                    self.modal = Modal::Rename(dlg, src);
-                    Disposition::Redraw
-                }
-                DialogOutcome::Cancelled => Disposition::Redraw,
-                DialogOutcome::Submitted(new_name) => {
-                    Disposition::RunOp(PendingOp::Rename { src, new_name })
-                }
+                DialogOutcome::Submitted(settings) => Disposition::RunOp(match kind {
+                    CopyMoveKind::Copy => PendingOp::SubmitCopy {
+                        sources,
+                        dst_input: settings.dst,
+                        src_cwd,
+                        opts: settings.opts,
+                    },
+                    CopyMoveKind::Move => PendingOp::SubmitMove {
+                        sources,
+                        dst_input: settings.dst,
+                        src_cwd,
+                        opts: settings.opts,
+                    },
+                }),
             },
             Modal::SelectGroup { mut dlg, select } => match dlg.handle_key(chord) {
                 DialogOutcome::None => {
@@ -606,6 +576,13 @@ impl App {
                 }
                 DialogOutcome::Cancelled | DialogOutcome::Submitted(false) => Disposition::Redraw,
                 DialogOutcome::Submitted(true) => Disposition::Quit,
+            },
+            Modal::Error(mut dlg) => match dlg.handle_key(chord) {
+                DialogOutcome::None => {
+                    self.modal = Modal::Error(dlg);
+                    Disposition::None
+                }
+                DialogOutcome::Cancelled | DialogOutcome::Submitted(()) => Disposition::Redraw,
             },
             Modal::QuickSearch(mut filter) => match (chord.code, chord.mods) {
                 (KeyCode::Escape, _) | (KeyCode::Enter, _) => Disposition::Redraw,

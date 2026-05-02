@@ -18,7 +18,7 @@ mod mouse;
 mod ops;
 mod render;
 
-pub use ops::{parent_path, parse_chown, vpath_to_local};
+pub use ops::{dst_input_is_dir, parent_path, parse_chown, parse_dst, vpath_to_local};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -79,10 +79,6 @@ pub enum PendingOp {
         in_dir: VPath,
         name: String,
     },
-    Rename {
-        src: VPath,
-        new_name: String,
-    },
     Chmod {
         targets: Vec<VPath>,
         mode: u32,
@@ -91,16 +87,23 @@ pub enum PendingOp {
         file: PathBuf,
         line: Option<u32>,
     },
-    /// Submit a recursive copy job.
+    /// Submit a recursive copy job. The raw destination string is resolved
+    /// asynchronously in the event loop: it may resolve to a directory
+    /// (use source basenames) or — for a single source — to a target
+    /// file path (combined copy + rename).
     SubmitCopy {
         sources: Vec<VPath>,
-        dst_dir: VPath,
+        dst_input: String,
+        src_cwd: VPath,
         opts: CopyOptions,
     },
-    /// Submit a recursive move job.
+    /// Submit a recursive move job. Destination resolution mirrors
+    /// `SubmitCopy`: a directory keeps source basenames; for a single
+    /// source a file path renames the source as part of the move.
     SubmitMove {
         sources: Vec<VPath>,
-        dst_dir: VPath,
+        dst_input: String,
+        src_cwd: VPath,
         opts: CopyOptions,
     },
     /// Submit a recursive delete job.
@@ -240,7 +243,6 @@ pub(super) enum Modal {
         src_cwd: VPath,
         kind: CopyMoveKind,
     },
-    Rename(InputDialog, VPath),
     SelectGroup {
         dlg: InputDialog,
         select: bool,
@@ -316,6 +318,10 @@ pub(super) enum Modal {
     VirtualFs(crate::tui::dialog::OptionsDialog),
     Theme(crate::tui::dialog::ThemeDialog),
     QuitConfirm(ConfirmDialog),
+    /// OK-only acknowledgement dialog shown when a job (copy/move/delete/...)
+    /// fails. Carries the description of the failed operation and the
+    /// underlying error string.
+    Error(crate::tui::dialog::ErrorDialog),
 }
 
 pub struct App {
@@ -504,28 +510,59 @@ impl App {
             _ => {}
         }
 
-        if let Modal::Progress(dlg) = &mut self.modal {
-            if dlg.handle.id != update.id {
-                return;
-            }
-            match update.kind {
-                crate::jobs::JobUpdateKind::Started { description } => {
-                    dlg.description = description
+        // Mirror live updates onto the progress dialog if it's the one in
+        // front and refers to the same job.
+        let progress_active_for_job = matches!(
+            &self.modal,
+            Modal::Progress(dlg) if dlg.handle.id == update.id
+        );
+        if progress_active_for_job {
+            if let Modal::Progress(dlg) = &mut self.modal {
+                match &update.kind {
+                    crate::jobs::JobUpdateKind::Started { description } => {
+                        dlg.description = description.clone();
+                    }
+                    crate::jobs::JobUpdateKind::Progress(p) => dlg.progress = *p,
+                    crate::jobs::JobUpdateKind::Status(s) => dlg.status = s.clone(),
+                    crate::jobs::JobUpdateKind::Log(_)
+                    | crate::jobs::JobUpdateKind::Finished(_) => {}
                 }
-                crate::jobs::JobUpdateKind::Progress(p) => dlg.progress = p,
-                crate::jobs::JobUpdateKind::Status(s) => dlg.status = s,
-                crate::jobs::JobUpdateKind::Log(_) => {}
-                crate::jobs::JobUpdateKind::Finished(o) => {
-                    let desc = dlg.description.clone();
-                    let status_msg = match &o {
-                        crate::jobs::JobOutcome::Success => None,
-                        crate::jobs::JobOutcome::Cancelled => Some(format!("{desc}: cancelled")),
-                        crate::jobs::JobOutcome::Failed(e) => Some(format!("{desc} failed: {e}")),
-                    };
-                    dlg.finished = Some(o);
-                    self.modal = Modal::None;
-                    if let Some(s) = status_msg {
-                        self.set_status(s);
+            }
+        }
+
+        // Resolve the description for terminal outcomes from the job log
+        // (it was stored on `Started` earlier in this same call).
+        if let crate::jobs::JobUpdateKind::Finished(o) = &update.kind {
+            let description = self
+                .job_log
+                .iter()
+                .find(|r| r.id == update.id)
+                .map_or_else(|| "operation".to_string(), |r| r.description.clone());
+            match o {
+                crate::jobs::JobOutcome::Success => {
+                    if progress_active_for_job {
+                        self.modal = Modal::None;
+                    }
+                }
+                crate::jobs::JobOutcome::Cancelled => {
+                    if progress_active_for_job {
+                        self.modal = Modal::None;
+                    }
+                    self.set_status(format!("{description}: cancelled"));
+                }
+                crate::jobs::JobOutcome::Failed(e) => {
+                    // Replace progress modal (if any) with the error dialog
+                    // so the user must acknowledge the failure. If the user
+                    // is in the middle of an unrelated modal, fall back to a
+                    // status-bar message — the failure remains in the job
+                    // log (Ctrl-J).
+                    let can_show_modal = matches!(self.modal, Modal::None | Modal::Progress(_));
+                    if can_show_modal {
+                        let message = format!("{description}\n\n{e}");
+                        self.modal =
+                            Modal::Error(crate::tui::dialog::ErrorDialog::new(" Error ", message));
+                    } else {
+                        self.set_status(format!("{description} failed: {e}"));
                     }
                 }
             }
@@ -956,7 +993,10 @@ const _: fn() = || {
 
 #[cfg(test)]
 mod tests {
-    use super::ops::{parent_path, parse_chown};
+    use super::ops::{
+        dst_input_is_dir, ensure_trailing_slash, join_with_slash, parent_path, parse_chown,
+        parse_dst,
+    };
     use crate::core::VPath;
 
     #[test]
@@ -980,5 +1020,49 @@ mod tests {
         let p = VPath::local("/a/b");
         let c = VPath::child(&p, "c").unwrap();
         assert_eq!(c.last().unwrap().sub.to_str().unwrap(), "/a/b/c");
+    }
+
+    #[test]
+    fn dst_input_trailing_slash_detected() {
+        assert!(dst_input_is_dir("/foo/"));
+        assert!(dst_input_is_dir("/foo/  "));
+        assert!(dst_input_is_dir("foo/"));
+        assert!(!dst_input_is_dir("/foo/bar"));
+        assert!(!dst_input_is_dir("foo"));
+        assert!(!dst_input_is_dir(""));
+    }
+
+    #[test]
+    fn join_with_slash_handles_trailing() {
+        assert_eq!(join_with_slash("/a/b", "c"), "/a/b/c");
+        assert_eq!(join_with_slash("/a/b/", "c"), "/a/b/c");
+        assert_eq!(join_with_slash("", "c"), "c");
+    }
+
+    #[test]
+    fn ensure_trailing_slash_idempotent() {
+        assert_eq!(ensure_trailing_slash("/x".into()), "/x/");
+        assert_eq!(ensure_trailing_slash("/x/".into()), "/x/");
+    }
+
+    #[test]
+    fn parse_dst_relative_under_local_cwd() {
+        let cwd = VPath::local("/home/u");
+        let p = parse_dst("foo.txt", &cwd).unwrap();
+        assert_eq!(p.last().unwrap().sub.to_str().unwrap(), "/home/u/foo.txt");
+    }
+
+    #[test]
+    fn parse_dst_absolute_local() {
+        let cwd = VPath::local("/home/u");
+        let p = parse_dst("/etc/hosts", &cwd).unwrap();
+        assert_eq!(p.last().unwrap().sub.to_str().unwrap(), "/etc/hosts");
+    }
+
+    #[test]
+    fn parse_dst_empty_is_none() {
+        let cwd = VPath::local("/home/u");
+        assert!(parse_dst("", &cwd).is_none());
+        assert!(parse_dst("   ", &cwd).is_none());
     }
 }
