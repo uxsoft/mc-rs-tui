@@ -24,6 +24,35 @@ use crate::tui::editor_spawn::{resolve_editor, spawn_editor};
 use crate::tui::event::chord_from_crossterm;
 use crate::tui::watcher::PanelWatcher;
 
+/// Create a filesystem symlink at `link` pointing to `target`.
+///
+/// Unix uses `std::os::unix::fs::symlink`. Windows requires choosing
+/// `symlink_file` vs `symlink_dir`; we probe `target` to pick. On Windows
+/// the calling user must have either Developer Mode or the
+/// `SeCreateSymbolicLinkPrivilege` (typically: admin).
+fn create_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "symlinks not supported on this platform",
+        ))
+    }
+}
+
 pub struct TerminalGuard {
     active: bool,
 }
@@ -310,9 +339,9 @@ fn run_shell_command(cwd: &std::path::Path, cmd: &str) -> anyhow::Result<()> {
     execute!(io::stdout(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let (shell, args) = crate::core::platform::default_shell();
     let status = Command::new(&shell)
-        .arg("-c")
+        .args(args)
         .arg(cmd)
         .current_dir(cwd)
         .status();
@@ -733,23 +762,15 @@ async fn run_op<B: ratatui::backend::Backend>(
             link,
             relative,
         } => {
-            #[cfg(unix)]
-            {
-                let actual = if relative {
-                    let parent = link.parent().unwrap_or(std::path::Path::new(""));
-                    pathdiff::diff_paths(&target, parent).unwrap_or_else(|| target.clone())
-                } else {
-                    target.clone()
-                };
-                if let Err(e) = std::os::unix::fs::symlink(&actual, &link) {
-                    tracing::warn!("symlink {} -> {}: {e}", actual.display(), link.display());
-                    app.set_status(format!("symlink failed: {e}"));
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (target, link, relative);
-                app.set_status("symlink: unix-only");
+            let actual = if relative {
+                let parent = link.parent().unwrap_or(std::path::Path::new(""));
+                pathdiff::diff_paths(&target, parent).unwrap_or_else(|| target.clone())
+            } else {
+                target.clone()
+            };
+            if let Err(e) = create_symlink(&actual, &link) {
+                tracing::warn!("symlink {} -> {}: {e}", actual.display(), link.display());
+                app.set_status(format!("symlink failed: {e}"));
             }
             app.refresh_active().await;
         }
@@ -763,20 +784,13 @@ async fn run_op<B: ratatui::backend::Backend>(
                     return;
                 }
             }
-            #[cfg(unix)]
-            {
-                if let Err(e) = std::os::unix::fs::symlink(&new_target, &link) {
-                    tracing::warn!(
-                        "edit symlink create {} -> {}: {e}",
-                        new_target.display(),
-                        link.display()
-                    );
-                    app.set_status(format!("edit symlink: {e}"));
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (link, new_target);
+            if let Err(e) = create_symlink(&new_target, &link) {
+                tracing::warn!(
+                    "edit symlink create {} -> {}: {e}",
+                    new_target.display(),
+                    link.display()
+                );
+                app.set_status(format!("edit symlink: {e}"));
             }
             app.refresh_active().await;
         }

@@ -140,7 +140,7 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

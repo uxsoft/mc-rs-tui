@@ -26,6 +26,9 @@ pub fn resolve_editor(configured: Option<&str>) -> String {
     if which::which("hx").is_ok() {
         return "hx".to_owned();
     }
+    if cfg!(windows) {
+        return "notepad.exe".to_owned();
+    }
     "vi".to_owned()
 }
 

@@ -6,6 +6,7 @@ pub mod error;
 pub mod key;
 pub mod macros;
 pub mod path;
+pub mod platform;
 pub mod theme;
 
 pub use action::Action;

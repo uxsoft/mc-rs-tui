@@ -10,7 +10,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(windows))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -45,6 +47,44 @@ impl ShellKind {
 /// Run the subshell. Returns the directory the user ended up in on exit (when
 /// we could determine it), or `None` on error or unsupported-shell paths.
 pub fn drop_to_shell_with_sync(cwd: &Path) -> Result<Option<PathBuf>> {
+    #[cfg(windows)]
+    {
+        return drop_to_shell_windows(cwd);
+    }
+    #[cfg(not(windows))]
+    {
+        drop_to_shell_posix(cwd)
+    }
+}
+
+#[cfg(windows)]
+fn drop_to_shell_windows(cwd: &Path) -> Result<Option<PathBuf>> {
+    // POSIX shell hooks (trap EXIT, fish_exit) don't apply to cmd.exe /
+    // PowerShell, so we just suspend and resume without cwd capture. If
+    // the user has set $SHELL (e.g. Git Bash), honor it interactively.
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty());
+    let prog = shell.unwrap_or_else(|| {
+        std::env::var("COMSPEC")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "cmd.exe".to_string())
+    });
+
+    execute!(io::stdout(), LeaveAlternateScreen).context("leave alt-screen")?;
+    disable_raw_mode().context("disable raw mode")?;
+
+    eprintln!("[mc-rs] drop to {prog} (type `exit` to return; cwd will not sync)");
+    if let Err(e) = Command::new(&prog).current_dir(cwd).status() {
+        tracing::warn!("subshell spawn: {e}");
+    }
+
+    enable_raw_mode().context("enable raw mode")?;
+    execute!(io::stdout(), EnterAlternateScreen).context("enter alt-screen")?;
+    Ok(None)
+}
+
+#[cfg(not(windows))]
+fn drop_to_shell_posix(cwd: &Path) -> Result<Option<PathBuf>> {
     let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let kind = ShellKind::from_path(&shell_path);
 
@@ -132,6 +172,7 @@ pub fn drop_to_shell_with_sync(cwd: &Path) -> Result<Option<PathBuf>> {
 /// Create a fresh, owner-only file in `$TMPDIR` to receive the shell's `pwd`.
 /// Uses `O_EXCL` so this fails (rather than overwriting) if the path already
 /// exists — defeating symlink-pre-placement attacks against a predictable name.
+#[cfg(not(windows))]
 fn create_pwd_tempfile() -> io::Result<PathBuf> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -163,6 +204,7 @@ fn create_pwd_tempfile() -> io::Result<PathBuf> {
     Err(last_err.unwrap_or_else(|| io::Error::other("could not create subshell tempfile")))
 }
 
+#[cfg(not(windows))]
 fn write_hook(name: &str, body: &str) -> io::Result<PathBuf> {
     // Each invocation gets a fresh tempdir to keep ZDOTDIR clean.
     let dir = std::env::temp_dir().join(format!("mc-rs-shell-{}-{}", std::process::id(), name));
@@ -175,6 +217,7 @@ fn write_hook(name: &str, body: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(not(windows))]
 fn shell_quote(s: &str) -> String {
     if s.bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
@@ -207,6 +250,7 @@ mod tests {
         assert_eq!(ShellKind::from_path("/opt/anything"), ShellKind::Sh);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn quoting() {
         assert_eq!(shell_quote("/tmp/foo"), "/tmp/foo");

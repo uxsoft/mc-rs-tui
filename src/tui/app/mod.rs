@@ -1048,6 +1048,7 @@ mod tests {
         assert_eq!(ensure_trailing_slash("/x/".into()), "/x/");
     }
 
+    #[cfg(unix)]
     #[test]
     fn parse_dst_relative_under_local_cwd() {
         let cwd = VPath::local("/home/u");
@@ -1055,6 +1056,7 @@ mod tests {
         assert_eq!(p.last().unwrap().sub.to_str().unwrap(), "/home/u/foo.txt");
     }
 
+    #[cfg(unix)]
     #[test]
     fn parse_dst_absolute_local() {
         let cwd = VPath::local("/home/u");

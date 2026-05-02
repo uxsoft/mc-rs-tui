@@ -14,7 +14,7 @@
 //!   - On a *recorded* host whose fingerprint differs the connection is
 //!     refused outright (no UI prompt for tampering).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::core::{Entry, EntryKind, Error, Result, VPath};
@@ -343,8 +343,8 @@ async fn try_agent(handle: &mut client::Handle<SshClient>, user: &str) -> Result
 }
 
 async fn try_key_file(handle: &mut client::Handle<SshClient>, user: &str) -> Result<bool> {
-    let home = match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h),
+    let home = match crate::core::platform::home_dir() {
+        Some(h) => h,
         None => return Ok(false),
     };
     for fname in ["id_ed25519", "id_rsa", "id_ecdsa"] {

@@ -18,9 +18,7 @@ impl ConfigPaths {
     /// doesn't litter the cwd with `.config/mc-rs/...`.
     #[must_use]
     pub fn discover() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+        let home = crate::core::platform::home_dir().unwrap_or_else(std::env::temp_dir);
 
         let config_dir = std::env::var_os("MC_RS_CONFIG_DIR")
             .map(PathBuf::from)

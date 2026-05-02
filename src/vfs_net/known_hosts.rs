@@ -47,7 +47,7 @@ impl KnownHosts {
     pub fn default_path() -> PathBuf {
         let cache = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+            .or_else(|| crate::core::platform::home_dir().map(|h| h.join(".cache")))
             .unwrap_or_else(std::env::temp_dir);
         cache.join("mc-rs").join("known_hosts")
     }

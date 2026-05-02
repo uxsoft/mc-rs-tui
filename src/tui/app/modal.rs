@@ -321,9 +321,8 @@ impl App {
                         s.parse::<VPath>().ok()
                     } else if s.starts_with('/') || s.starts_with('~') {
                         let expanded = if let Some(rest) = s.strip_prefix("~") {
-                            let home = std::env::var_os("HOME")
-                                .map(PathBuf::from)
-                                .unwrap_or_else(|| PathBuf::from("/"));
+                            let home = crate::core::platform::home_dir()
+                                .unwrap_or_else(std::env::temp_dir);
                             home.join(rest.trim_start_matches('/'))
                         } else {
                             PathBuf::from(s)

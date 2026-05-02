@@ -119,9 +119,10 @@ impl Vfs for LocalVfs {
             | Capabilities::WRITE
             | Capabilities::STAT
             | Capabilities::RANDOM_READ
-            | Capabilities::WATCH;
+            | Capabilities::WATCH
+            | Capabilities::SYMLINK;
         if cfg!(unix) {
-            caps |= Capabilities::SYMLINK | Capabilities::CHMOD | Capabilities::CHOWN;
+            caps |= Capabilities::CHMOD | Capabilities::CHOWN;
         }
         caps
     }
