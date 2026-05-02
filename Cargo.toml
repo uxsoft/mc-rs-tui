@@ -2,7 +2,8 @@
 name = "mc-rs"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
+description = "A Rust port of GNU Midnight Commander — a dual-panel terminal file manager."
 repository = "https://github.com/uxsoft/mc-rs-tui"
 rust-version = "1.85"
 
