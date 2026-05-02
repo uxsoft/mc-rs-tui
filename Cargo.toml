@@ -1,62 +1,76 @@
-[workspace]
-resolver = "3"
-members = [
-    "crates/mc-core",
-    "crates/mc-vfs",
-    "crates/mc-vfs-archive",
-    "crates/mc-vfs-net",
-    "crates/mc-jobs",
-    "crates/mc-find",
-    "crates/mc-diff",
-    "crates/mc-config",
-    "crates/mc-tui",
-    "crates/mc",
-]
-
-[workspace.package]
+[package]
+name = "mc-rs"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/uxsoft/mc-rs-tui"
 rust-version = "1.85"
 
-[workspace.dependencies]
-# Internal crates
-mc-core = { path = "crates/mc-core" }
-mc-vfs = { path = "crates/mc-vfs" }
-mc-vfs-archive = { path = "crates/mc-vfs-archive" }
-mc-vfs-net = { path = "crates/mc-vfs-net" }
-mc-jobs = { path = "crates/mc-jobs" }
-mc-find = { path = "crates/mc-find" }
-mc-diff = { path = "crates/mc-diff" }
-mc-config = { path = "crates/mc-config" }
-mc-tui = { path = "crates/mc-tui" }
+[[bin]]
+name = "mc-rs"
+path = "src/main.rs"
 
-# Tier-1 third-party
-ratatui = "0.30"
+[dependencies]
+anyhow = "1"
+arboard = { version = "3", default-features = false }
+async-trait = "0.1"
+base64 = "0.22"
+bitflags = { version = "2", features = ["serde"] }
+bzip2 = "0.5"
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
+cpio-archive = "0.10"
 crossterm = { version = "0.29", features = ["event-stream"] }
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "process", "signal", "io-util", "time", "sync"] }
+encoding_rs = "0.8"
+flate2 = "1"
+futures = "0.3"
+globset = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
+imara-diff = "0.2"
+jwalk = "0.8"
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+pathdiff = "0.2"
+percent-encoding = "2"
+quick-xml = "0.38"
+ratatui = "0.30"
+ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+russh = "0.54"
+russh-sftp = "2"
+sevenz-rust2 = { version = "0.18", default-features = false }
+serde = { version = "1", features = ["derive"] }
+smallvec = { version = "1", features = ["serde"] }
+suppaftp = { version = "8", default-features = false, features = ["tokio"] }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+tar = "0.4"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "process", "signal", "io-util", "time", "sync", "net"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
-futures = "0.3"
-async-trait = "0.1"
-serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-thiserror = "2"
-anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-color-eyre = "0.6"
-clap = { version = "4", features = ["derive"] }
-bitflags = { version = "2", features = ["serde"] }
-smallvec = { version = "1", features = ["serde"] }
-globset = "0.4"
-regex = "1"
+tree_magic_mini = "3"
+unrar = { version = "0.5", optional = true }
+url = "2"
+which = "8"
+xz2 = "0.1"
+zip = { version = "5", default-features = false, features = ["deflate"] }
+zstd = "0.13"
 
-[workspace.lints.rust]
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["user", "fs"] }
+
+[features]
+default = []
+rar = ["dep:unrar"]
+
+[lints.rust]
 unsafe_code = "deny"
 
-[workspace.lints.clippy]
+[lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"

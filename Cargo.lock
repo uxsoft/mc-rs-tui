@@ -2515,163 +2515,58 @@ dependencies = [
 ]
 
 [[package]]
-name = "mc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "color-eyre",
- "mc-config",
- "mc-tui",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mc-config"
-version = "0.1.0"
-dependencies = [
- "globset",
- "mc-core",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "mc-core"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.11.1",
- "serde",
- "smallvec",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "mc-diff"
-version = "0.1.0"
-dependencies = [
- "imara-diff",
-]
-
-[[package]]
-name = "mc-find"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "mc-core",
- "mc-vfs",
- "regex",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "mc-jobs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mc-core",
- "mc-vfs",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "mc-tui"
+name = "mc-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "async-trait",
  "base64",
+ "bitflags 2.11.1",
+ "bzip2",
+ "clap",
+ "color-eyre",
+ "cpio-archive",
  "crossterm",
  "encoding_rs",
+ "flate2",
  "futures",
+ "globset",
  "image",
+ "imara-diff",
  "jwalk",
- "mc-config",
- "mc-core",
- "mc-diff",
- "mc-find",
- "mc-jobs",
- "mc-vfs",
- "mc-vfs-archive",
- "mc-vfs-net",
  "nix 0.30.1",
  "notify",
  "pathdiff",
- "ratatui",
- "ratatui-image",
- "syntect",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tree_magic_mini",
- "which",
-]
-
-[[package]]
-name = "mc-vfs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bitflags 2.11.1",
- "mc-core",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "mc-vfs-archive"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bzip2",
- "cpio-archive",
- "flate2",
- "mc-core",
- "mc-vfs",
- "sevenz-rust2",
- "tar",
- "tempfile",
- "tokio",
- "tracing",
- "unrar",
- "xz2",
- "zip",
- "zstd",
-]
-
-[[package]]
-name = "mc-vfs-net"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mc-core",
- "mc-vfs",
  "percent-encoding",
  "quick-xml",
+ "ratatui",
+ "ratatui-image",
+ "regex",
  "reqwest",
  "russh",
  "russh-sftp",
+ "serde",
+ "sevenz-rust2",
+ "smallvec",
  "suppaftp",
+ "syntect",
+ "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
  "tracing",
+ "tracing-subscriber",
+ "tree_magic_mini",
+ "unrar",
  "url",
+ "which",
+ "xz2",
+ "zip",
+ "zstd",
 ]
 
 [[package]]
