@@ -123,3 +123,62 @@ async fn copy_cancel_stops_early() {
     assert!(matches!(outcome, JobOutcome::Cancelled));
     while rx.try_recv().is_ok() {}
 }
+
+/// Simulates the "copy to /usr/local/bin without root" failure: the destination
+/// directory is read-only for the running process, so opening the destination
+/// file for write must fail. The job should report this as `JobOutcome::Failed`
+/// with a non-empty error string — that's what the UI relies on to surface an
+/// error dialog.
+#[cfg(unix)]
+#[tokio::test]
+async fn copy_to_readonly_dir_yields_failed_outcome() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    std::fs::write(src.path().join("foo.txt"), b"hello").unwrap();
+
+    // Strip every write bit so the test process (non-root) cannot create
+    // entries inside `dst`. Skip the test if we are root, since root bypasses
+    // permission checks.
+    let mut perms = std::fs::metadata(dst.path()).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(dst.path(), perms).unwrap();
+    if nix::unistd::Uid::effective().is_root() {
+        // Restore so TempDir cleanup works.
+        let mut p = std::fs::metadata(dst.path()).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(dst.path(), p).unwrap();
+        eprintln!("skipping: running as root bypasses permission checks");
+        return;
+    }
+
+    let vfs = LocalVfs::shared();
+    let sources = vec![VPath::local(src.path().join("foo.txt"))];
+    let dst_dir = VPath::local(dst.path().to_path_buf());
+    let mut job = CopyJob::new(
+        vfs.clone(),
+        vfs.clone(),
+        sources,
+        dst_dir,
+        CopyOptions::default(),
+    );
+    let (tx, mut rx) = mpsc::channel(64);
+    let ctx = JobCtx {
+        id: jobs::JobId(1),
+        progress: tx,
+        cancel: CancellationToken::new(),
+    };
+    let outcome = job.run(ctx).await.unwrap();
+
+    // Restore so TempDir cleanup works.
+    let mut p = std::fs::metadata(dst.path()).unwrap().permissions();
+    p.set_mode(0o755);
+    std::fs::set_permissions(dst.path(), p).unwrap();
+
+    while rx.try_recv().is_ok() {}
+    match outcome {
+        JobOutcome::Failed(e) => assert!(!e.is_empty(), "Failed outcome should carry error text"),
+        other => panic!("expected JobOutcome::Failed, got {other:?}"),
+    }
+}

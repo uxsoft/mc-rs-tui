@@ -1,10 +1,14 @@
 //! Panel-mode key handling: top-level `handle_panel_key`, the smaller
 //! tree-mode variant, the Ctrl-X chord dispatcher, and the small selection
-//! helpers (`apply_select_group`, `apply_quick_search`).
+//! helpers (`apply_select_group`, `apply_quick_search`,
+//! `apply_quick_search_next`).
 
 use std::path::PathBuf;
 
+use nucleo_matcher::{Config as NucleoConfig, Matcher as NucleoMatcher, Utf32Str};
+
 use crate::config::ExtAction;
+use crate::core::Entry;
 use crate::core::EntryKind;
 use crate::core::key::{KeyChord, KeyCode, KeyMods};
 
@@ -14,6 +18,41 @@ use crate::tui::panel::ListingMode;
 
 use super::ops::{next_sort, parent_path, vpath_to_local};
 use super::{App, CopyMoveKind, Disposition, Modal, PendingOp};
+
+fn fuzzy_score(matcher: &mut NucleoMatcher, needle: &str, name: &str) -> Option<u16> {
+    let mut nbuf = Vec::new();
+    let mut hbuf = Vec::new();
+    let needle = Utf32Str::new(needle, &mut nbuf);
+    let hay = Utf32Str::new(name, &mut hbuf);
+    matcher.fuzzy_match(hay, needle)
+}
+
+/// Best-scoring entry index for `filter`. Skips `..`. Returns `None` if no
+/// entry matches.
+fn best_fuzzy_match(filter: &str, entries: &[Entry]) -> Option<usize> {
+    let mut matcher = NucleoMatcher::new(NucleoConfig::DEFAULT);
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.name != "..")
+        .filter_map(|(i, e)| fuzzy_score(&mut matcher, filter, &e.name).map(|s| (i, s)))
+        .max_by_key(|&(i, s)| (s, std::cmp::Reverse(i)))
+        .map(|(i, _)| i)
+}
+
+/// All entry indices that match `filter`, sorted by score descending (ties
+/// broken by index ascending — i.e. earlier in the listing wins). Skips `..`.
+fn ranked_fuzzy_matches(filter: &str, entries: &[Entry]) -> Vec<usize> {
+    let mut matcher = NucleoMatcher::new(NucleoConfig::DEFAULT);
+    let mut scored: Vec<(usize, u16)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.name != "..")
+        .filter_map(|(i, e)| fuzzy_score(&mut matcher, filter, &e.name).map(|s| (i, s)))
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored.into_iter().map(|(i, _)| i).collect()
+}
 
 /// Detect MIME for a local file via libmagic-style sniffing. Returns `None`
 /// for non-local paths (caller falls back to glob-only matching).
@@ -44,15 +83,30 @@ impl App {
         if filter.is_empty() {
             return;
         }
-        let lower = filter.to_lowercase();
-        let p = self.active();
-        if let Some(idx) = p
-            .entries
-            .iter()
-            .position(|e| e.name.to_lowercase().starts_with(&lower))
-        {
-            p.cursor = idx;
+        if let Some(idx) = best_fuzzy_match(filter, &self.active_ref().entries) {
+            self.active().cursor = idx;
         }
+    }
+
+    /// Step to the next/previous fuzzy-ranked match while the quick-search bar
+    /// is open. `dir` is `+1` for next-best, `-1` for previous-best. Wraps.
+    pub(super) fn apply_quick_search_next(&mut self, filter: &str, dir: i32) {
+        if filter.is_empty() {
+            return;
+        }
+        let cursor = self.active_ref().cursor;
+        let ranked = ranked_fuzzy_matches(filter, &self.active_ref().entries);
+        if ranked.is_empty() {
+            return;
+        }
+        let pos = ranked.iter().position(|&i| i == cursor);
+        let next = match (pos, dir) {
+            (Some(p), d) if d > 0 => (p + 1) % ranked.len(),
+            (Some(p), _) => (p + ranked.len() - 1) % ranked.len(),
+            (None, d) if d > 0 => 0,
+            (None, _) => ranked.len() - 1,
+        };
+        self.active().cursor = ranked[next];
     }
 
     pub(super) fn handle_ctrl_x(&mut self, chord: KeyChord) -> Disposition {
@@ -307,7 +361,7 @@ impl App {
             }
 
             // Hidden toggle
-            (KeyCode::Char('.'), m) if m == KeyMods::CTRL || m == KeyMods::ALT => {
+            (KeyCode::Char('.'), m) if m.is_empty() || m == KeyMods::CTRL || m == KeyMods::ALT => {
                 self.active().show_hidden = !self.active().show_hidden;
                 Disposition::ReloadActive
             }
@@ -336,8 +390,12 @@ impl App {
                 Disposition::Redraw
             }
 
-            // Quick search (mc Ctrl-S).
+            // Quick search (mc Ctrl-S, plus `/` for fuzzy-incremental jump).
             (KeyCode::Char('s'), m) if m == KeyMods::CTRL => {
+                self.modal = Modal::QuickSearch(String::new());
+                Disposition::Redraw
+            }
+            (KeyCode::Char('/'), m) if m.is_empty() || m == KeyMods::SHIFT => {
                 self.modal = Modal::QuickSearch(String::new());
                 Disposition::Redraw
             }

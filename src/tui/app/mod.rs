@@ -551,18 +551,21 @@ impl App {
                     self.set_status(format!("{description}: cancelled"));
                 }
                 crate::jobs::JobOutcome::Failed(e) => {
-                    // Replace progress modal (if any) with the error dialog
-                    // so the user must acknowledge the failure. If the user
-                    // is in the middle of an unrelated modal, fall back to a
-                    // status-bar message — the failure remains in the job
-                    // log (Ctrl-J).
+                    // Always surface the failure in the status bar — that
+                    // line stays visible even if the error modal is dismissed
+                    // immediately by a queued keypress, and acts as a safety
+                    // net for races we may not have spotted.
+                    self.set_status(format!("{description} failed: {e}"));
+                    // Replace the progress modal (if any) with the error
+                    // dialog so the user must acknowledge the failure. If
+                    // the user is in the middle of an unrelated modal, the
+                    // status-bar message above is still visible and the
+                    // failure remains in the job log (Ctrl-J).
                     let can_show_modal = matches!(self.modal, Modal::None | Modal::Progress(_));
                     if can_show_modal {
                         let message = format!("{description}\n\n{e}");
                         self.modal =
                             Modal::Error(crate::tui::dialog::ErrorDialog::new(" Error ", message));
-                    } else {
-                        self.set_status(format!("{description} failed: {e}"));
                     }
                 }
             }
@@ -1064,5 +1067,59 @@ mod tests {
         let cwd = VPath::local("/home/u");
         assert!(parse_dst("", &cwd).is_none());
         assert!(parse_dst("   ", &cwd).is_none());
+    }
+
+    #[test]
+    fn failed_job_outcome_opens_error_modal() {
+        use crate::config::AppConfig;
+        use crate::jobs::{JobId, JobOutcome, JobUpdate, JobUpdateKind};
+        use std::path::PathBuf;
+        let (mut app, _rx) = super::App::new(AppConfig::default(), PathBuf::from("/tmp"));
+        let id = JobId::next();
+        app.handle_job_update(JobUpdate {
+            id,
+            kind: JobUpdateKind::Started {
+                description: "Copy foo".into(),
+            },
+        });
+        app.handle_job_update(JobUpdate {
+            id,
+            kind: JobUpdateKind::Finished(JobOutcome::Failed("permission denied".into())),
+        });
+        assert!(
+            matches!(app.modal, super::Modal::Error(_)),
+            "expected Modal::Error after JobOutcome::Failed",
+        );
+    }
+
+    #[test]
+    fn failed_job_outcome_replaces_progress_modal_with_error() {
+        use crate::config::AppConfig;
+        use crate::jobs::{JobHandle, JobId, JobOutcome, JobUpdate, JobUpdateKind};
+        use std::path::PathBuf;
+        use tokio_util::sync::CancellationToken;
+        let (mut app, _rx) = super::App::new(AppConfig::default(), PathBuf::from("/tmp"));
+        let id = JobId::next();
+        app.handle_job_update(JobUpdate {
+            id,
+            kind: JobUpdateKind::Started {
+                description: "Copy foo".into(),
+            },
+        });
+        // Simulate the 250 ms-delayed Progress dialog being promoted to active.
+        let handle = JobHandle {
+            id,
+            cancel: CancellationToken::new(),
+        };
+        app.show_progress(handle, "Copy foo".into());
+        assert!(matches!(app.modal, super::Modal::Progress(_)));
+        app.handle_job_update(JobUpdate {
+            id,
+            kind: JobUpdateKind::Finished(JobOutcome::Failed("permission denied".into())),
+        });
+        assert!(
+            matches!(app.modal, super::Modal::Error(_)),
+            "expected Modal::Error to replace Modal::Progress on Failed",
+        );
     }
 }

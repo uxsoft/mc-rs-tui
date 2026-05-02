@@ -592,6 +592,16 @@ impl App {
                     self.modal = Modal::QuickSearch(filter);
                     Disposition::Redraw
                 }
+                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyMods::CTRL) => {
+                    self.apply_quick_search_next(&filter, 1);
+                    self.modal = Modal::QuickSearch(filter);
+                    Disposition::Redraw
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyMods::CTRL) => {
+                    self.apply_quick_search_next(&filter, -1);
+                    self.modal = Modal::QuickSearch(filter);
+                    Disposition::Redraw
+                }
                 (KeyCode::Char(c), m) if m.is_empty() || m == KeyMods::SHIFT => {
                     filter.push(c);
                     self.apply_quick_search(&filter);

@@ -30,6 +30,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 imara-diff = "0.2"
 jwalk = "0.8"
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+nucleo-matcher = "0.3"
 pathdiff = "0.2"
 percent-encoding = "2"
 quick-xml = "0.38"
