@@ -1022,7 +1022,8 @@ mod tests {
     fn child_path_appends() {
         let p = VPath::local("/a/b");
         let c = VPath::child(&p, "c").unwrap();
-        assert_eq!(c.last().unwrap().sub.to_str().unwrap(), "/a/b/c");
+        let expected = format!("/a/b{}c", std::path::MAIN_SEPARATOR);
+        assert_eq!(c.last().unwrap().sub.to_str().unwrap(), expected);
     }
 
     #[test]

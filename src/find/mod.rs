@@ -247,8 +247,9 @@ mod tests {
             .into_iter()
             .map(|p| p.to_string())
             .collect();
-        assert!(names.iter().any(|n| n.ends_with("src/lib.rs")));
-        assert!(names.iter().any(|n| n.ends_with("src/util.rs")));
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(names.iter().any(|n| n.ends_with(&format!("src{sep}lib.rs"))));
+        assert!(names.iter().any(|n| n.ends_with(&format!("src{sep}util.rs"))));
         assert!(!names.iter().any(|n| n.contains(".git")));
     }
 
@@ -269,7 +270,8 @@ mod tests {
         let rx = run(vfs, q, CancellationToken::new());
         let paths = collect(rx).await;
         assert_eq!(paths.len(), 1);
-        assert!(paths[0].to_string().ends_with("src/lib.rs"));
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(paths[0].to_string().ends_with(&format!("src{sep}lib.rs")));
     }
 
     #[tokio::test]

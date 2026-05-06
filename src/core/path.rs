@@ -207,7 +207,8 @@ mod tests {
     fn child_appends_safely() {
         let p = VPath::local("/a/b");
         let c = p.child("c").unwrap();
-        assert_eq!(c.last().unwrap().sub.to_str().unwrap(), "/a/b/c");
+        let expected = format!("/a/b{}c", std::path::MAIN_SEPARATOR);
+        assert_eq!(c.last().unwrap().sub.to_str().unwrap(), expected);
     }
 
     #[test]
