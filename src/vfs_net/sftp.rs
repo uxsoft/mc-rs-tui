@@ -1,7 +1,7 @@
 //! Read-only SFTP backend (Phase 8 first cut).
 //!
 //! Authentication tries, in order:
-//! 1. ssh-agent via `$SSH_AUTH_SOCK`
+//! 1. ssh-agent (Unix: `$SSH_AUTH_SOCK`; Windows: `\\.\pipe\openssh-ssh-agent` or Pageant)
 //! 2. private key files at `~/.ssh/id_ed25519` and `~/.ssh/id_rsa` (no passphrase)
 //!
 //! Host-key verification:
@@ -307,31 +307,27 @@ async fn try_password_env(handle: &mut client::Handle<SshClient>, user: &str) ->
     }
 }
 
-async fn try_agent(handle: &mut client::Handle<SshClient>, user: &str) -> Result<bool> {
-    let sock = match std::env::var_os("SSH_AUTH_SOCK") {
-        Some(s) => s,
-        None => return Ok(false),
-    };
-    let mut agent = match russh::keys::agent::client::AgentClient::connect_uds(sock).await {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::debug!("ssh-agent: {e}");
-            return Ok(false);
-        }
-    };
+async fn use_agent<S>(
+    agent: &mut russh::keys::agent::client::AgentClient<S>,
+    handle: &mut client::Handle<SshClient>,
+    user: &str,
+) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let identities = match agent.request_identities().await {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!("ssh-agent identities: {e}");
-            return Ok(false);
+            return false;
         }
     };
     for id in identities {
         match handle
-            .authenticate_publickey_with(user, id, Some(russh::keys::HashAlg::Sha512), &mut agent)
+            .authenticate_publickey_with(user, id, Some(russh::keys::HashAlg::Sha512), agent)
             .await
         {
-            Ok(res) if res.success() => return Ok(true),
+            Ok(res) if res.success() => return true,
             Ok(_) => continue,
             Err(e) => {
                 tracing::debug!("ssh-agent pubkey: {e}");
@@ -339,6 +335,50 @@ async fn try_agent(handle: &mut client::Handle<SshClient>, user: &str) -> Result
             }
         }
     }
+    false
+}
+
+#[cfg(unix)]
+async fn try_agent(handle: &mut client::Handle<SshClient>, user: &str) -> Result<bool> {
+    use russh::keys::agent::client::AgentClient;
+    let sock = match std::env::var_os("SSH_AUTH_SOCK") {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+    let mut agent = match AgentClient::connect_uds(sock).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!("ssh-agent: {e}");
+            return Ok(false);
+        }
+    };
+    Ok(use_agent(&mut agent, handle, user).await)
+}
+
+#[cfg(windows)]
+async fn try_agent(handle: &mut client::Handle<SshClient>, user: &str) -> Result<bool> {
+    use russh::keys::agent::client::AgentClient;
+
+    // OpenSSH for Windows: named pipe. SSH_AUTH_SOCK overrides the default
+    // pipe path if set (cygwin/msys2 setups sometimes export it).
+    let pipe = std::env::var_os("SSH_AUTH_SOCK")
+        .unwrap_or_else(|| std::ffi::OsString::from(r"\\.\pipe\openssh-ssh-agent"));
+    match AgentClient::connect_named_pipe(&pipe).await {
+        Ok(mut agent) => {
+            if use_agent(&mut agent, handle, user).await {
+                return Ok(true);
+            }
+        }
+        Err(e) => tracing::debug!("ssh-agent named pipe {:?}: {e}", pipe),
+    }
+
+    // Pageant. connect_pageant() is infallible; failures show up later as
+    // request_identities errors, which use_agent logs and treats as "no auth".
+    let mut agent = AgentClient::connect_pageant().await;
+    if use_agent(&mut agent, handle, user).await {
+        return Ok(true);
+    }
+
     Ok(false)
 }
 
